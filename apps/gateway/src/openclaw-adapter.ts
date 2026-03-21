@@ -77,40 +77,49 @@ function cleanText(text: string) {
     .trim();
 }
 
+function formatToolCall(item: any) {
+  if (!item?.name) return "";
+  const maybeCmd = item.arguments?.command ? cleanText(String(item.arguments.command)).slice(0, 120) : "";
+  return maybeCmd ? `Using ${String(item.name)}: ${maybeCmd}` : `Using tool: ${String(item.name)}`;
+}
+
 function extractSummaryFromTail(tail: string) {
   const lines = tail.split(/\r?\n/).filter(Boolean);
   let fallbackUser = "";
+  let recentToolActivity = "";
+  let recentAssistantText = "";
+
   for (let i = lines.length - 1; i >= 0; i--) {
     try {
       const obj = JSON.parse(lines[i]);
       if (obj.type !== "message") continue;
       const msg = obj.message;
       if (!msg || !msg.role) continue;
+
       if (msg.role === "assistant") {
         const content = Array.isArray(msg.content) ? msg.content : [];
-        for (let j = content.length - 1; j >= 0; j--) {
-          const item = content[j];
-          if (item?.type === "text" && item.text) {
-            const text = cleanText(String(item.text)).slice(0, 220);
-            if (text) return `Done: ${text}`;
-          }
-          if (item?.type === "thinking" && item.thinking) {
-            const text = cleanText(String(item.thinking)).slice(0, 180);
-            if (text) return `Thinking: ${text}`;
-          }
-          if (item?.type === "toolCall" && item.name) {
-            const maybeCmd = item.arguments?.command ? cleanText(String(item.arguments.command)).slice(0, 120) : "";
-            return maybeCmd ? `Using ${String(item.name)}: ${maybeCmd}` : `Using tool: ${String(item.name)}`;
-          }
+        const textItems = content
+          .filter((item: any) => item?.type === "text" && item.text)
+          .map((item: any) => cleanText(String(item.text)).slice(0, 220))
+          .filter(Boolean);
+        const toolItems = content
+          .filter((item: any) => item?.type === "toolCall" && item.name)
+          .map(formatToolCall)
+          .filter(Boolean);
+
+        const joinedText = textItems.join(" • ").trim();
+        if (joinedText && !recentAssistantText) recentAssistantText = joinedText;
+        if (toolItems.length > 0 && !recentToolActivity) recentToolActivity = toolItems[0];
+
+        if (msg.stopReason === "toolUse") {
+          if (joinedText) return joinedText;
+          if (toolItems.length > 0) return toolItems[0];
         }
+
+        if (joinedText) return `Done: ${joinedText}`;
+        if (toolItems.length > 0) return toolItems[0];
       }
-      if (msg.role === "toolResult") {
-        const text = msg.content?.[0]?.text;
-        if (text) {
-          const cleaned = cleanText(String(text)).slice(0, 200);
-          if (cleaned) return `Tool result: ${cleaned}`;
-        }
-      }
+
       if (msg.role === "user") {
         const text = msg.content?.[0]?.text;
         if (text && !fallbackUser) fallbackUser = cleanText(String(text)).slice(0, 180);
@@ -119,6 +128,9 @@ function extractSummaryFromTail(tail: string) {
       continue;
     }
   }
+
+  if (recentAssistantText) return recentAssistantText;
+  if (recentToolActivity) return recentToolActivity;
   return fallbackUser ? `Task: ${fallbackUser}` : "Idle";
 }
 
@@ -151,8 +163,8 @@ export class OpenClawAdapter {
 
   start() {
     if (this.timer) return;
-    this.sync();
-    this.timer = setInterval(() => this.sync(), POLL_MS);
+    this.sync(true);
+    this.timer = setInterval(() => this.sync(false), POLL_MS);
   }
 
   stop() {
@@ -164,11 +176,11 @@ export class OpenClawAdapter {
     return Array.from(this.seen.keys());
   }
 
-  syncNow() {
-    this.sync();
+  syncNow(force = false) {
+    this.sync(force);
   }
 
-  private sync() {
+  private sync(force = false) {
     const agentIds = listAgentIds();
     const activeIds = new Set<string>();
 
@@ -193,7 +205,7 @@ export class OpenClawAdapter {
         startedAt: snapshot.updatedAt || undefined,
       });
 
-      if (!prev || prev.status !== snapshot.status || prev.summary !== snapshot.summary) {
+      if (force || !prev || prev.status !== snapshot.status || prev.summary !== snapshot.summary) {
         this.publishEvent({
           type: "AGENT_STATUS",
           agentId,
@@ -202,7 +214,7 @@ export class OpenClawAdapter {
         });
       }
 
-      if (!prev || prev.summary !== snapshot.summary) {
+      if (force || !prev || prev.summary !== snapshot.summary) {
         if (snapshot.status === "working") {
           this.publishEvent({
             type: "TASK_STARTED",
