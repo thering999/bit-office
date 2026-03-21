@@ -29,47 +29,72 @@ let scanner: ProcessScanner | null = null;
 let outputReader: ExternalOutputReader | null = null;
 let openclawAdapter: OpenClawAdapter | null = null;
 
+function summarizeOpenClawText(text: string, max = 180) {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (cleaned.length <= max) return cleaned;
+  return `${cleaned.slice(0, max - 1).trimEnd()}…`;
+}
+
+function extractOpenClawReply(stdout: string) {
+  const trimmed = stdout.trim();
+  const jsonCandidates = trimmed.match(/\{[\s\S]*\}/g) ?? [];
+  for (let i = jsonCandidates.length - 1; i >= 0; i--) {
+    try {
+      const parsed = JSON.parse(jsonCandidates[i]);
+      const candidate = parsed?.result?.response ?? parsed?.response ?? parsed?.message ?? parsed?.text;
+      if (typeof candidate === "string" && candidate.trim()) {
+        return candidate.trim();
+      }
+    } catch {
+      // Try previous candidate.
+    }
+  }
+  return "";
+}
+
 async function runOpenClawOneShot(agentId: string, taskId: string, prompt: string) {
+  const shortPrompt = summarizeOpenClawText(prompt);
   publishEvent({ type: "TASK_STARTED", agentId, taskId, prompt });
-  publishEvent({ type: "AGENT_STATUS", agentId, status: "working", details: `Sending to OpenClaw ${agentId.replace(/^openclaw:/, "")}: ${prompt.slice(0, 180)}` });
+  publishEvent({ type: "LOG_APPEND", agentId, taskId, stream: "stdout", chunk: `Sending to Main: ${shortPrompt}` });
+  publishEvent({ type: "AGENT_STATUS", agentId, status: "working", details: `Sending to Main: ${shortPrompt}` });
+
+  const startedAt = Date.now();
+  const statusTimer = setTimeout(() => {
+    publishEvent({ type: "LOG_APPEND", agentId, taskId, stream: "stdout", chunk: "Main is working on it…" });
+    publishEvent({ type: "AGENT_STATUS", agentId, status: "working", details: "Main is working on it…" });
+  }, 1200);
 
   execFile("openclaw", ["agent", "--agent", agentId.replace(/^openclaw:/, ""), "--message", prompt, "--json"], {
     timeout: 10 * 60 * 1000,
     maxBuffer: 4 * 1024 * 1024,
     windowsHide: true,
   }, (error, stdout, stderr) => {
+    clearTimeout(statusTimer);
     const trimmedStdout = stdout.trim();
     const trimmedStderr = stderr.trim();
-    const jsonStart = trimmedStdout.lastIndexOf("\n{") >= 0 ? trimmedStdout.lastIndexOf("\n{") + 1 : trimmedStdout.indexOf("{");
-    const jsonText = jsonStart >= 0 ? trimmedStdout.slice(jsonStart) : "";
-
-    let replyText = "";
-    try {
-      const parsed = jsonText ? JSON.parse(jsonText) : null;
-      const candidate = parsed?.result?.response ?? parsed?.response ?? parsed?.message ?? parsed?.text;
-      if (typeof candidate === "string") replyText = candidate.trim();
-    } catch {
-      // Fall back to raw stdout below.
-    }
-
+    const replyText = extractOpenClawReply(trimmedStdout);
     const display = replyText || trimmedStdout || trimmedStderr;
+
     if (display) {
       publishEvent({ type: "LOG_APPEND", agentId, taskId, stream: error ? "stderr" : "stdout", chunk: display });
     }
 
     if (error) {
-      publishEvent({ type: "AGENT_STATUS", agentId, status: "error", details: trimmedStderr || error.message || "OpenClaw task failed" });
-      publishEvent({ type: "TASK_FAILED", agentId, taskId, error: trimmedStderr || error.message || "OpenClaw task failed" });
+      const message = trimmedStderr || error.message || "OpenClaw task failed";
+      publishEvent({ type: "AGENT_STATUS", agentId, status: "error", details: summarizeOpenClawText(message) });
+      publishEvent({ type: "TASK_FAILED", agentId, taskId, error: message });
       return;
     }
 
-    publishEvent({ type: "AGENT_STATUS", agentId, status: "idle", details: replyText ? `Last reply: ${replyText.slice(0, 180)}` : "Completed one-shot task" });
+    const durationSec = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    const replySummary = replyText ? summarizeOpenClawText(replyText) : `Completed in ${durationSec}s`;
+    publishEvent({ type: "AGENT_STATUS", agentId, status: "idle", details: `Reply: ${replySummary}` });
     publishEvent({
       type: "TASK_DONE",
       agentId,
       taskId,
       result: {
-        summary: replyText || "Completed one-shot task",
+        summary: replyText || replySummary,
         fullOutput: display || undefined,
         changedFiles: [],
         diffStat: "",

@@ -143,6 +143,16 @@ function ThinkingBubble({ logLine }: { logLine: string | null }) {
   );
 }
 
+function compactActivityText(text: string, max = 160) {
+  const cleaned = text
+    .replace(/\s+/g, " ")
+    .replace(/^Sending to OpenClaw\s+main:\s*/i, "Sending to Main: ")
+    .replace(/^Last reply:\s*/i, "Reply: ")
+    .trim();
+  if (cleaned.length <= max) return cleaned;
+  return `${cleaned.slice(0, max - 1).trimEnd()}…`;
+}
+
 function summarizeAgentActivity(agent: {
   status: string;
   currentPrompt?: string | null;
@@ -152,15 +162,27 @@ function summarizeAgentActivity(agent: {
   pendingApproval?: { title: string; summary: string } | null;
 }) {
   if (agent.pendingApproval) {
-    return `${agent.pendingApproval.title}: ${agent.pendingApproval.summary}`.trim();
+    return compactActivityText(`${agent.pendingApproval.title}: ${agent.pendingApproval.summary}`.trim());
   }
-  if (agent.statusDetails?.trim()) return agent.statusDetails.trim();
-  if (agent.status === "working" && agent.currentPrompt?.trim()) return agent.currentPrompt.trim();
-  if (agent.lastLogLine?.trim()) return agent.lastLogLine.trim();
+  if (agent.status === "working" && agent.statusDetails?.trim()) return compactActivityText(agent.statusDetails.trim());
+  if (agent.status === "working" && agent.currentPrompt?.trim()) return compactActivityText(agent.currentPrompt.trim());
+  if (agent.lastLogLine?.trim()) return compactActivityText(agent.lastLogLine.trim());
+  if (agent.statusDetails?.trim()) return compactActivityText(agent.statusDetails.trim());
   const lastMessage = [...(agent.messages ?? [])].reverse().find((msg) => msg.text?.trim());
-  if (lastMessage?.text?.trim()) return lastMessage.text.trim();
+  if (lastMessage?.text?.trim()) return compactActivityText(lastMessage.text.trim());
   return agent.status === "idle" ? "Standing by for the next task." : "No recent activity yet.";
 }
+
+const OPENCLAW_DEMO_PROMPTS = [
+  {
+    label: "Ping Main",
+    prompt: "Reply in 3 short bullets: (1) who you are in OpenClaw, (2) what you can help with here, (3) one suggested next demo step for OpenOffice.",
+  },
+  {
+    label: "Demo Loop",
+    prompt: "Demo the OpenOffice loop clearly. In 4 short sections, return: STATUS, WHAT I UNDERSTOOD, NEXT ACTION, RESULT TO SHOW IN OFFICE UI. Keep it concise and user-facing.",
+  },
+];
 
 function TeamOverviewStrip({
   agents,
@@ -3463,6 +3485,36 @@ export default function OfficePage() {
                         ))}
                         <div ref={chatEndRef} />
                       </div>
+
+                      {agent.agentId === "openclaw:main" && (
+                        <div style={{
+                          padding: "8px 12px 4px",
+                          backgroundColor: TERM_SURFACE,
+                          borderTop: `1px solid ${TERM_GREEN}10`,
+                          display: "flex",
+                          gap: 6,
+                          flexWrap: "wrap",
+                          flexShrink: 0,
+                        }}>
+                          {OPENCLAW_DEMO_PROMPTS.map((item) => (
+                            <button
+                              key={item.label}
+                              onClick={() => setPrompt(item.prompt)}
+                              style={{
+                                padding: "4px 10px",
+                                border: `1px solid ${TERM_GREEN}30`,
+                                backgroundColor: `${TERM_GREEN}08`,
+                                color: TERM_TEXT,
+                                fontSize: 11,
+                                cursor: "pointer",
+                                fontFamily: TERM_FONT,
+                              }}
+                            >
+                              {item.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
 
                       {/* Read-only footer */}
                       <div style={{
