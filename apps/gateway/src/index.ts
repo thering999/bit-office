@@ -729,6 +729,13 @@ function handleCommand(parsed: Command, meta: CommandMeta) {
         });
       }
       openclawAdapter?.syncNow();
+      publishEvent({
+        type: "TEAM_CHAT",
+        fromAgentId: "openclaw:main",
+        message: "OpenClaw team synced into office view",
+        messageType: "status",
+        timestamp: Date.now(),
+      });
       publishEvent({ type: "AGENT_DEFS", agents: agentDefs });
       break;
     }
