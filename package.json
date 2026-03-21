@@ -3,12 +3,12 @@
   "private": true,
   "version": "0.1.3",
   "scripts": {
-    "dev": "pnpm --filter bit-office dev & pnpm --filter web dev",
-    "dev:web": "pnpm --filter web dev",
-    "dev:gateway": "pnpm --filter bit-office dev",
-    "start": "pnpm --filter web build && pnpm --filter bit-office start",
-    "build": "pnpm -r build",
-    "build:release": "pnpm --filter web build && pnpm --filter bit-office build",
+    "dev": "concurrently \"corepack pnpm --filter bit-office dev\" \"corepack pnpm --filter web dev\"",
+    "dev:web": "corepack pnpm --filter web dev",
+    "dev:gateway": "corepack pnpm --filter bit-office dev",
+    "start": "corepack pnpm --filter web build && corepack pnpm --filter bit-office start",
+    "build": "corepack pnpm -r build",
+    "build:release": "corepack pnpm --filter web build && corepack pnpm --filter bit-office build",
     "publish:release": "pnpm run build:release && cd apps/gateway && npm publish",
     "lint": "pnpm -r lint",
     "start:local": "bash scripts/start-local.sh",
@@ -16,6 +16,7 @@
     "build:desktop": "pnpm --filter bit-office-desktop build"
   },
   "devDependencies": {
+    "concurrently": "^9.2.1",
     "typescript": "^5.7.0"
   }
 }

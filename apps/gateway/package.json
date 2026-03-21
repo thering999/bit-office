@@ -10,7 +10,7 @@
     "dist"
   ],
   "scripts": {
-    "dev": "NODE_ENV=development WS_PORT=9099 tsx watch src/index.ts",
+    "dev": "cross-env NODE_ENV=development WS_PORT=9099 tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "build": "tsup && rm -rf dist/web && cp -r ../web/out dist/web",
     "typecheck": "tsc --noEmit"
@@ -28,6 +28,7 @@
     "@types/node": "^22.0.0",
     "@types/node-telegram-bot-api": "^0.64.13",
     "@types/ws": "^8.5.0",
+    "cross-env": "^10.1.0",
     "tsup": "^8.5.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
