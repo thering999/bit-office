@@ -17,6 +17,7 @@ import os from "os";
 import { ProcessScanner } from "./process-scanner.js";
 import { ExternalOutputReader } from "./external-output-reader.js";
 import { loadTeamState, saveTeamState, clearTeamState, type TeamState, type PersistedAgent, bufferEvent, archiveProject, resetProjectBuffer, setProjectName, listProjects, loadProject, loadProjectBuffer, rateProject } from "./team-state.js";
+import { OpenClawAdapter } from "./openclaw-adapter.js";
 
 // Register all channels — each one self-activates if configured
 registerChannel(wsChannel);
@@ -26,6 +27,7 @@ registerChannel(telegramChannel);
 let orc: Orchestrator;
 let scanner: ProcessScanner | null = null;
 let outputReader: ExternalOutputReader | null = null;
+let openclawAdapter: OpenClawAdapter | null = null;
 
 /** Track external agents so PING can broadcast them */
 const externalAgents = new Map<string, { agentId: string; name: string; backendId: string; pid: number; cwd: string | null; startedAt: number; status: "working" | "idle" }>();
@@ -671,6 +673,7 @@ function handleCommand(parsed: Command, meta: CommandMeta) {
       const allAgents = orc.getAllAgents();
       const allAgentIds = allAgents.map(a => a.agentId);
       for (const [, ext] of externalAgents) { allAgentIds.push(ext.agentId); }
+      for (const id of openclawAdapter?.getAgentIds() ?? []) { allAgentIds.push(id); }
       publishEvent({ type: "AGENTS_SYNC", agentIds: allAgentIds });
       for (const agent of allAgents) {
         publishEvent({
@@ -725,6 +728,7 @@ function handleCommand(parsed: Command, meta: CommandMeta) {
           status: ext.status,
         });
       }
+      openclawAdapter?.syncNow();
       publishEvent({ type: "AGENT_DEFS", agents: agentDefs });
       break;
     }
@@ -1050,6 +1054,9 @@ async function main() {
   );
   scanner.start();
 
+  openclawAdapter = new OpenClawAdapter(publishEvent);
+  openclawAdapter.start();
+
   const backendNames = config.detectedBackends.map((id) => getBackend(id)?.name ?? id).join(", ");
   console.log(`[Gateway] AI backends: ${backendNames || "none detected"} (default: ${getBackend(config.defaultBackend)?.name ?? config.defaultBackend})`);
   console.log(`[Gateway] Permissions: ${config.sandboxMode === "full" ? "Full access" : "Sandbox"}`);
@@ -1089,6 +1096,7 @@ function cleanup() {
   try { persistTeamState(); } catch { /* ignore */ }
   outputReader?.detachAll();
   scanner?.stop();
+  openclawAdapter?.stop();
   previewServer.stop();
   orc?.destroy();
   destroyTransports();
