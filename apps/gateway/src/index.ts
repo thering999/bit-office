@@ -29,6 +29,56 @@ let scanner: ProcessScanner | null = null;
 let outputReader: ExternalOutputReader | null = null;
 let openclawAdapter: OpenClawAdapter | null = null;
 
+async function runOpenClawOneShot(agentId: string, taskId: string, prompt: string) {
+  publishEvent({ type: "TASK_STARTED", agentId, taskId, prompt });
+  publishEvent({ type: "AGENT_STATUS", agentId, status: "working", details: `Sending to OpenClaw ${agentId.replace(/^openclaw:/, "")}: ${prompt.slice(0, 180)}` });
+
+  execFile("openclaw", ["agent", "--agent", agentId.replace(/^openclaw:/, ""), "--message", prompt, "--json"], {
+    timeout: 10 * 60 * 1000,
+    maxBuffer: 4 * 1024 * 1024,
+    windowsHide: true,
+  }, (error, stdout, stderr) => {
+    const trimmedStdout = stdout.trim();
+    const trimmedStderr = stderr.trim();
+    const jsonStart = trimmedStdout.lastIndexOf("\n{") >= 0 ? trimmedStdout.lastIndexOf("\n{") + 1 : trimmedStdout.indexOf("{");
+    const jsonText = jsonStart >= 0 ? trimmedStdout.slice(jsonStart) : "";
+
+    let replyText = "";
+    try {
+      const parsed = jsonText ? JSON.parse(jsonText) : null;
+      const candidate = parsed?.result?.response ?? parsed?.response ?? parsed?.message ?? parsed?.text;
+      if (typeof candidate === "string") replyText = candidate.trim();
+    } catch {
+      // Fall back to raw stdout below.
+    }
+
+    const display = replyText || trimmedStdout || trimmedStderr;
+    if (display) {
+      publishEvent({ type: "LOG_APPEND", agentId, taskId, stream: error ? "stderr" : "stdout", chunk: display });
+    }
+
+    if (error) {
+      publishEvent({ type: "AGENT_STATUS", agentId, status: "error", details: trimmedStderr || error.message || "OpenClaw task failed" });
+      publishEvent({ type: "TASK_FAILED", agentId, taskId, error: trimmedStderr || error.message || "OpenClaw task failed" });
+      return;
+    }
+
+    publishEvent({ type: "AGENT_STATUS", agentId, status: "idle", details: replyText ? `Last reply: ${replyText.slice(0, 180)}` : "Completed one-shot task" });
+    publishEvent({
+      type: "TASK_DONE",
+      agentId,
+      taskId,
+      result: {
+        summary: replyText || "Completed one-shot task",
+        fullOutput: display || undefined,
+        changedFiles: [],
+        diffStat: "",
+        testResult: "unknown",
+      },
+    });
+  });
+}
+
 /** Track external agents so PING can broadcast them */
 const externalAgents = new Map<string, { agentId: string; name: string; backendId: string; pid: number; cwd: string | null; startedAt: number; status: "working" | "idle" }>();
 
@@ -368,6 +418,10 @@ function handleCommand(parsed: Command, meta: CommandMeta) {
       break;
     }
     case "RUN_TASK": {
+      if (parsed.agentId === "openclaw:main") {
+        runOpenClawOneShot(parsed.agentId, parsed.taskId, parsed.prompt);
+        break;
+      }
       let agent = orc.getAgent(parsed.agentId);
       if (!agent && parsed.name) {
         // Fallback auto-create (team state should normally restore agents on startup)

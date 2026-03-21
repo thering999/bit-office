@@ -43,6 +43,7 @@ interface AgentState {
   } | null;
   messages: ChatMessage[];
   lastLogLine: string | null;
+  statusDetails?: string | null;
   tokenUsage: { inputTokens: number; outputTokens: number };
   /** Accumulated token baseline from completed tasks (live TOKEN_UPDATE adds on top) */
   _tokenBaseline?: { inputTokens: number; outputTokens: number };
@@ -248,6 +249,7 @@ function defaultAgent(agentId: string, name = agentId, role = ""): AgentState {
     pendingApproval: null,
     messages: [],
     lastLogLine: null,
+    statusDetails: null,
     tokenUsage: { inputTokens: 0, outputTokens: 0 },
   };
 }
@@ -423,7 +425,11 @@ export const useOfficeStore = create<OfficeStore>((set, get) => ({
         }
         case "AGENT_STATUS": {
           const agent = agents.get(event.agentId) ?? defaultAgent(event.agentId);
-          agents.set(event.agentId, { ...agent, status: event.status });
+          agents.set(event.agentId, {
+            ...agent,
+            status: event.status,
+            statusDetails: event.details ?? agent.statusDetails ?? null,
+          });
           break;
         }
         case "TASK_STARTED": {

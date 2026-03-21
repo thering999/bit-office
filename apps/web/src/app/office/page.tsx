@@ -147,12 +147,14 @@ function summarizeAgentActivity(agent: {
   status: string;
   currentPrompt?: string | null;
   lastLogLine?: string | null;
+  statusDetails?: string | null;
   messages?: Array<{ text: string }>;
   pendingApproval?: { title: string; summary: string } | null;
 }) {
   if (agent.pendingApproval) {
     return `${agent.pendingApproval.title}: ${agent.pendingApproval.summary}`.trim();
   }
+  if (agent.statusDetails?.trim()) return agent.statusDetails.trim();
   if (agent.status === "working" && agent.currentPrompt?.trim()) return agent.currentPrompt.trim();
   if (agent.lastLogLine?.trim()) return agent.lastLogLine.trim();
   const lastMessage = [...(agent.messages ?? [])].reverse().find((msg) => msg.text?.trim());
@@ -174,6 +176,7 @@ function TeamOverviewStrip({
     status: string;
     currentPrompt?: string | null;
     lastLogLine?: string | null;
+    statusDetails?: string | null;
     messages?: Array<{ text: string }>;
     pendingApproval?: { title: string; summary: string } | null;
     isTeamLead?: boolean;
@@ -2873,7 +2876,8 @@ export default function OfficePage() {
   const handleRunTask = useCallback(async () => {
     if (!selectedAgent || (!prompt.trim() && pendingImages.length === 0)) return;
     const agent = agents.get(selectedAgent);
-    if (agent?.isExternal) return;
+    const canSendToExternal = selectedAgent === "openclaw:main";
+    if (agent?.isExternal && !canSendToExternal) return;
 
     // Upload images first, collect paths
     const imagePaths: string[] = [];
@@ -3467,11 +3471,11 @@ export default function OfficePage() {
                         fontSize: TERM_SIZE, color: TERM_DIM, fontFamily: TERM_FONT,
                         textAlign: "center", flexShrink: 0,
                       }}>
-                        Read-only — this process is running externally
+                        {agent.agentId === "openclaw:main" ? "OpenClaw main accepts one-shot tasks from here" : "Read-only — this process is running externally"}
                       </div>
                     </div>
                   )}
-                  {isExpanded && agentState && !isExternal && (
+                  {isExpanded && agentState && (!isExternal || agent.agentId === "openclaw:main") && (
                     <div
                       onPaste={handlePasteImage}
                       onDragOver={(e) => { if (e.dataTransfer?.types?.includes("Files")) { e.preventDefault(); e.currentTarget.style.outline = "2px solid #e8b04060"; } }}
@@ -3946,6 +3950,7 @@ export default function OfficePage() {
                     status: agent.status,
                     currentPrompt: state?.currentPrompt,
                     lastLogLine: state?.lastLogLine,
+                    statusDetails: state?.statusDetails,
                     messages: state?.messages,
                     pendingApproval: state?.pendingApproval,
                     isTeamLead: agent.isTeamLead,
