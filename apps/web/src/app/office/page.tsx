@@ -143,6 +143,108 @@ function ThinkingBubble({ logLine }: { logLine: string | null }) {
   );
 }
 
+function summarizeAgentActivity(agent: {
+  status: string;
+  currentPrompt?: string | null;
+  lastLogLine?: string | null;
+  messages?: Array<{ text: string }>;
+  pendingApproval?: { title: string; summary: string } | null;
+}) {
+  if (agent.pendingApproval) {
+    return `${agent.pendingApproval.title}: ${agent.pendingApproval.summary}`.trim();
+  }
+  if (agent.status === "working" && agent.currentPrompt?.trim()) return agent.currentPrompt.trim();
+  if (agent.lastLogLine?.trim()) return agent.lastLogLine.trim();
+  const lastMessage = [...(agent.messages ?? [])].reverse().find((msg) => msg.text?.trim());
+  if (lastMessage?.text?.trim()) return lastMessage.text.trim();
+  return agent.status === "idle" ? "Standing by for the next task." : "No recent activity yet.";
+}
+
+function TeamOverviewStrip({
+  agents,
+  selectedAgent,
+  onSelect,
+  assetsReady,
+}: {
+  agents: Array<{
+    agentId: string;
+    name: string;
+    role: string;
+    palette?: number;
+    status: string;
+    currentPrompt?: string | null;
+    lastLogLine?: string | null;
+    messages?: Array<{ text: string }>;
+    pendingApproval?: { title: string; summary: string } | null;
+    isTeamLead?: boolean;
+  }>;
+  selectedAgent: string | null;
+  onSelect: (agentId: string) => void;
+  assetsReady?: boolean;
+}) {
+  if (agents.length === 0) return null;
+
+  return (
+    <div style={{
+      padding: "10px 12px",
+      borderBottom: `1px solid ${TERM_GREEN}12`,
+      background: "linear-gradient(180deg, rgba(8,12,8,0.92) 0%, rgba(8,12,8,0.75) 100%)",
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      flexShrink: 0,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <div>
+          <div style={{ color: "#e8b040", fontSize: 10, fontFamily: TERM_FONT, letterSpacing: "0.12em" }}>OPENCLAW LIVE</div>
+          <div style={{ color: "#b09878", fontSize: 12, fontFamily: TERM_FONT }}>Who is doing what right now</div>
+        </div>
+        <div style={{ color: "#6f7f6f", fontSize: 11, fontFamily: TERM_FONT }}>{agents.length} agent{agents.length > 1 ? "s" : ""}</div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 8 }}>
+        {agents.map((agent) => {
+          const cfg = STATUS_CONFIG[agent.status] ?? STATUS_CONFIG.idle;
+          const summary = summarizeAgentActivity(agent);
+          const isActive = selectedAgent === agent.agentId;
+          return (
+            <button
+              key={agent.agentId}
+              onClick={() => onSelect(agent.agentId)}
+              style={{
+                textAlign: "left",
+                padding: "9px 10px",
+                border: `1px solid ${isActive ? cfg.color : "#293129"}`,
+                background: isActive ? `${cfg.color}12` : "rgba(20,24,20,0.9)",
+                color: "inherit",
+                cursor: "pointer",
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                minHeight: 94,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                {agent.palette !== undefined && <SpriteAvatar palette={agent.palette} zoom={1} ready={assetsReady} />}
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ color: "#eddcb8", fontSize: 12, fontWeight: 700, fontFamily: TERM_FONT }}>{agent.name}</span>
+                    {agent.isTeamLead && <span style={{ fontSize: 9, padding: "1px 4px", border: "1px solid #e8903060", color: "#e89030", fontFamily: TERM_FONT }}>LEAD</span>}
+                  </div>
+                  <div style={{ color: "#7a6858", fontSize: 10, fontFamily: TERM_FONT }}>{agent.role}</div>
+                </div>
+                <span style={{ color: cfg.color, fontSize: 10, fontFamily: TERM_FONT }}>{cfg.label}</span>
+              </div>
+              <div style={{ color: "#b09878", fontSize: 11, lineHeight: 1.45, fontFamily: TERM_FONT, wordBreak: "break-word" }}>
+                {summary.slice(0, 160)}{summary.length > 160 ? "..." : ""}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 const RATING_DIMENSIONS = [
   { key: "creativity", label: "Creativity", icon: "✦" },
   { key: "visual", label: "Visual", icon: "◈" },
@@ -2614,6 +2716,7 @@ export default function OfficePage() {
     if (lead) {
       setSelectedAgent(lead.agentId);
       setChatOpen(true);
+      if (lead.teamId) setExpandedSection("team");
     }
   }, [agents, selectedAgent]);
 
@@ -2622,10 +2725,10 @@ export default function OfficePage() {
     setChatOpen(true);
     const agent = agents.get(agentId);
     if (agent) {
-      if (agent.isExternal) {
-        setExpandedSection("external");
-      } else if (agent.teamId) {
+      if (agent.teamId) {
         setExpandedSection("team");
+      } else if (agent.isExternal) {
+        setExpandedSection("external");
       } else {
         setExpandedSection("agents");
       }
@@ -2867,7 +2970,7 @@ export default function OfficePage() {
   const agentList = Array.from(agents.values());
   const teamAgents = agentList.filter((a) => !!a.teamId);
   const soloAgents = agentList.filter((a) => !a.teamId && !a.isExternal);
-  const externalAgents = agentList.filter((a) => !!a.isExternal);
+  const externalAgents = agentList.filter((a) => !!a.isExternal && !a.teamId);
   const editor = editorRef.current;
 
   // Responsive: detect mobile
@@ -3831,6 +3934,28 @@ export default function OfficePage() {
               setTimeout(() => { setSelectedAgent(first.agentId); setChatOpen(true); }, 0);
               return null;
             })()}
+            {expandedSection === "team" && teamAgents.length > 0 && (
+              <TeamOverviewStrip
+                agents={teamAgents.map((agent) => {
+                  const state = agents.get(agent.agentId);
+                  return {
+                    agentId: agent.agentId,
+                    name: agent.name,
+                    role: agent.role,
+                    palette: agent.palette,
+                    status: agent.status,
+                    currentPrompt: state?.currentPrompt,
+                    lastLogLine: state?.lastLogLine,
+                    messages: state?.messages,
+                    pendingApproval: state?.pendingApproval,
+                    isTeamLead: agent.isTeamLead,
+                  };
+                })}
+                selectedAgent={selectedAgent}
+                onSelect={(agentId) => { setSelectedAgent(agentId); setChatOpen(true); }}
+                assetsReady={assetsReady}
+              />
+            )}
             {selectedAgent && selectedInTab ? (
               <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
                 {renderAgentRow(activeAgentList.find((a) => a.agentId === selectedAgent)!)}
