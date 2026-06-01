@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
 
+import { resolveAssetPath } from "@/lib/assets";
+
 export const metadata: Metadata = {
   title: "Bit Office",
   description: "Control your AI agents from anywhere",
-  manifest: "/manifest.json",
+  manifest: resolveAssetPath("/manifest.json"),
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -42,6 +44,37 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             --term-code-text: #6a8a6a;
             --term-scroll-thumb: #1a3a1a;
 
+            /* ── Interactive ── */
+            --btn-hover-bg: #152515;
+            --btn-active-bg: #203520;
+          }
+
+          .btn-browse {
+            padding: 6px 12px;
+            border: 1px solid var(--term-border);
+            background-color: var(--term-surface);
+            color: #9a8a68;
+            font-size: 12px;
+            cursor: pointer;
+            font-family: 'JetBrains Mono', monospace;
+            white-space: nowrap;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+          }
+          .btn-browse:hover {
+            background-color: var(--btn-hover-bg);
+            color: var(--term-green);
+            border-color: var(--term-green-dim);
+            box-shadow: 0 0 8px rgba(24,255,98,0.15);
+          }
+          .btn-browse:active {
+            background-color: var(--btn-active-bg);
+            transform: translateY(1px);
+          }
+
+          :root {
             /* ── Legacy aliases (for components not yet migrated) ── */
             --px-bg-deep: var(--office-bg);
             --px-bg-panel: var(--office-panel);

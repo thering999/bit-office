@@ -16,6 +16,13 @@ const BAKED_KEYS = {
   openai:     process.env.NEXT_PUBLIC_OPENAI_API_KEY      ?? "",
 };
 
+/** Get API key (prefers localStorage user key, falls back to baked-in secret) */
+function getApiKey(provider: CloudProvider): string {
+  if (typeof window === "undefined") return BAKED_KEYS[provider];
+  const userKey = localStorage.getItem(`cloud_key_${provider}`);
+  return userKey || BAKED_KEYS[provider];
+}
+
 export type CloudProvider = keyof typeof BAKED_KEYS;
 
 export interface CloudAIRequest {
@@ -65,7 +72,7 @@ const PROVIDER_CONFIGS: Record<string, { url: string; model: string }> = {
 const SMART_QUEUE: CloudProvider[] = ["gemini", "groq", "openrouter", "typhoon", "deepseek", "openai", "claude"];
 
 async function callProvider(provider: CloudProvider, prompt: string, systemPrompt?: string): Promise<string> {
-  const key = BAKED_KEYS[provider];
+  const key = getApiKey(provider);
   if (!key) throw new Error(`No API key for ${provider}`);
 
   const cfg = PROVIDER_CONFIGS[provider];

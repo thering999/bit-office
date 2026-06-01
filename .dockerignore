@@ -1,0 +1,17 @@
+node_modules
+**/node_modules
+dist
+**/dist
+.next
+**/out
+.git
+.turbo
+*.log
+.env
+.env.local
+**/agent-sessions.json
+**/agents.json
+**/mesh.db
+**/session-tokens.json
+**/team-state.json
+**/project-events.jsonl

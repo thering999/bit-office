@@ -1,75 +1,32 @@
 import { create } from "zustand";
-import type { AgentStatus, GatewayEvent, TaskResultPayload, AgentDefinition, UserRole } from "@office/shared";
+import { nanoid } from "nanoid";
+import {
+  GatewayEvent,
+  ChatMessage,
+  AgentState,
+  DataPacket,
+  TeamChatMessage,
+  TeamPhaseState,
+  UserRole,
+  AgentDefinition,
+  GatewayEventSchema,
+} from "@office/shared";
 
-/** Pending PICK_FOLDER callbacks: requestId → callback */
-export const folderPickCallbacks = new Map<string, (path: string) => void>();
-/** Pending UPLOAD_IMAGE callbacks: requestId → callback */
-export const imageUploadCallbacks = new Map<string, (path: string) => void>();
+export type { ChatMessage, TeamChatMessage, TeamPhaseState, AgentState };
 
-export interface ChatMessage {
-  id: string;
-  role: "user" | "agent" | "system";
-  text: string;
-  timestamp: number;
-  result?: TaskResultPayload;
-  isFinalResult?: boolean;
-  durationMs?: number;
-  /** Accumulated full output from LOG_APPEND (streaming only) */
-  _accumulatedText?: string;
+export interface ProjectPreview {
+  entryFile?: string;
+  projectDir?: string;
+  previewCmd?: string;
+  previewPort?: number;
 }
 
-interface AgentState {
-  agentId: string;
-  name: string;
-  role: string;
-  palette?: number;
-  personality?: string;
-  backend?: string;
-  isTeamLead?: boolean;
-  teamId?: string;
-  isExternal?: boolean;
-  pid?: number;
-  cwd?: string;
-  workDir?: string;
-  startedAt?: number;
-  status: AgentStatus;
-  currentTaskId: string | null;
-  currentPrompt: string | null;
-  pendingApproval: {
-    approvalId: string;
-    title: string;
-    summary: string;
-    riskLevel: string;
-  } | null;
-  messages: ChatMessage[];
-  lastLogLine: string | null;
-  statusDetails?: string | null;
-  tokenUsage: { inputTokens: number; outputTokens: number };
-  /** Accumulated token baseline from completed tasks (live TOKEN_UPDATE adds on top) */
-  _tokenBaseline?: { inputTokens: number; outputTokens: number };
+export interface TokenUsageSummary {
+  inputTokens: number;
+  outputTokens: number;
 }
 
-export interface TeamChatMessage {
-  id: string;
-  fromAgentId: string;
-  fromAgentName: string;
-  toAgentId?: string;
-  toAgentName?: string;
-  message: string;
-  messageType: "delegation" | "result" | "status";
-  timestamp: number;
-}
-
-export interface TeamPhaseState {
-  phase: string;
-  leadAgentId: string;
-}
-
-export interface Suggestion {
-  text: string;
-  author: string;
-  timestamp: number;
-}
+export type ProjectRatings = Record<string, number>;
 
 export interface ProjectSummary {
   id: string;
@@ -78,41 +35,80 @@ export interface ProjectSummary {
   endedAt: number;
   agentNames: string[];
   eventCount: number;
-  preview?: {
-    entryFile?: string;
-    projectDir?: string;
-    previewCmd?: string;
-    previewPort?: number;
-  };
-  tokenUsage?: { inputTokens: number; outputTokens: number };
-  ratings?: Record<string, number>;
+  preview?: ProjectPreview;
+  tokenUsage?: TokenUsageSummary;
+  ratings?: ProjectRatings;
 }
 
 interface OfficeStore {
   agents: Map<string, AgentState>;
+  agentDefs: AgentDefinition[];
   teamMessages: TeamChatMessage[];
   teamPhases: Map<string, TeamPhaseState>;
-  agentDefs: AgentDefinition[];
   role: UserRole;
-  suggestions: Suggestion[];
+  suggestions: { text: string; author: string; timestamp: number }[];
   projectList: ProjectSummary[];
+  activePackets: DataPacket[];
   viewingProjectId: string | null;
   viewingProjectEvents: GatewayEvent[];
   viewingProjectName: string | null;
   pendingPreviewUrl: string | null;
+  backendOptions: any[];
+  config: any;
+  keyStatus: any[] | null;
   connected: boolean;
   hydrated: boolean;
+  voiceEnabled: boolean;
+  voiceLang: string;
+  swarmHealth: {
+    score: number;
+    status: string;
+    diagnostics: string[];
+    recommendations: string[];
+  };
+  knowledgeContent: string | null;
+  knowledgeDir: string | null;
+  setKnowledge: (content: string, dir: string) => void;
+
+  // System logs and activities telemetry
+  systemLogs: { id: string; agentId: string; stream: "stdout" | "stderr"; chunk: string; timestamp: number }[];
+  executionSteps: { id: string; agentId: string; type: string; message: string; timestamp: number }[];
+  clearLogs: () => void;
+
+  // UI States
+  showThoughtStream: boolean;
+  showHealthDashboard: boolean;
+  setShowThoughtStream: (show: boolean) => void;
+  setShowHealthDashboard: (show: boolean) => void;
+  toggleThoughtStream: () => void;
+  toggleHealthDashboard: () => void;
+
+  setVoiceEnabled: (enabled: boolean) => void;
+  setVoiceLang: (lang: string) => void;
+
   consumePreviewUrl: () => string | null;
   setConnected: (c: boolean) => void;
   setRole: (role: UserRole) => void;
   hydrate: () => void;
-  handleEvent: (event: GatewayEvent) => void;
   getAgent: (id: string) => AgentState;
-  addUserMessage: (agentId: string, taskId: string, prompt: string) => void;
   removeAgent: (agentId: string) => void;
   clearTeamMessages: () => void;
   clearViewingProject: () => void;
+  addUserMessage: (agentId: string, taskId: string, prompt: string) => void;
+  handleEvent: (event: GatewayEvent) => void;
 }
+
+export const folderPickCallbacks = new Map<string, (path: string) => void>();
+export const imageUploadCallbacks = new Map<string, (path: string) => void>();
+
+export function registerFolderPick(requestId: string, callback: (path: string) => void) {
+  folderPickCallbacks.set(requestId, callback);
+}
+
+export function registerImageUpload(requestId: string, callback: (path: string) => void) {
+  imageUploadCallbacks.set(requestId, callback);
+}
+
 
 // ── localStorage persistence ──
 
@@ -262,12 +258,49 @@ export const useOfficeStore = create<OfficeStore>((set, get) => ({
   role: "owner" as UserRole,
   suggestions: [],
   projectList: [],
+  activePackets: [],
   viewingProjectId: null,
   viewingProjectEvents: [],
   viewingProjectName: null,
   pendingPreviewUrl: null,
+  backendOptions: [],
+  config: {},
+  keyStatus: null,
   connected: false,
   hydrated: false,
+  voiceEnabled: false,
+  voiceLang: "th-TH",
+  swarmHealth: {
+    score: 100,
+    status: "healthy",
+    diagnostics: ["All systems operational", "Swarm synchronizer active"],
+    recommendations: ["System optimal", "No immediate actions required"]
+  },
+  knowledgeContent: null,
+  knowledgeDir: null,
+  setKnowledge: (content, dir) => set({ knowledgeContent: content, knowledgeDir: dir }),
+
+  // System logs and activities telemetry initial state
+  systemLogs: [],
+  executionSteps: [],
+  clearLogs: () => set({ systemLogs: [], executionSteps: [] }),
+
+  // UI States
+  showThoughtStream: false,
+  showHealthDashboard: false,
+  setShowThoughtStream: (show) => set({ showThoughtStream: show }),
+  setShowHealthDashboard: (show) => set({ showHealthDashboard: show }),
+  toggleThoughtStream: () => {
+    console.log("[Store] Toggling Thought Stream");
+    set(s => ({ showThoughtStream: !s.showThoughtStream }));
+  },
+  toggleHealthDashboard: () => {
+    console.log("[Store] Toggling Health Dashboard");
+    set(s => ({ showHealthDashboard: !s.showHealthDashboard }));
+  },
+
+  setVoiceEnabled: (enabled) => set({ voiceEnabled: enabled }),
+  setVoiceLang: (lang) => set({ voiceLang: lang }),
 
   consumePreviewUrl: () => {
     const url = get().pendingPreviewUrl;
@@ -344,448 +377,517 @@ export const useOfficeStore = create<OfficeStore>((set, get) => ({
   },
 
   handleEvent: (event) => {
+    const events = event.type === "BATCH" ? (event.events as GatewayEvent[]) : [event];
+
     set((state) => {
-      const agents = new Map(state.agents);
+      let nextAgents = new Map(state.agents);
+      let nextTeamMessages = [...state.teamMessages];
+      let nextTeamPhases = new Map(state.teamPhases);
+      let nextSuggestions = [...state.suggestions];
+      let partialState: Partial<OfficeStore> = {};
 
-      switch (event.type) {
-        case "AGENTS_SYNC": {
-          // Remove agents that no longer exist on the gateway (e.g. after restart)
-          const validIds = new Set(event.agentIds);
-          for (const agentId of agents.keys()) {
-            if (!validIds.has(agentId)) {
-              agents.delete(agentId);
-            }
-          }
-          break;
+      for (const e of events) {
+        // Capture global system logs
+        if (e.type === "LOG_APPEND") {
+          const newLog = {
+            id: nanoid(),
+            agentId: e.agentId,
+            stream: e.stream,
+            chunk: e.chunk,
+            timestamp: Date.now(),
+          };
+          const currentLogs = partialState.systemLogs || state.systemLogs || [];
+          partialState.systemLogs = [...currentLogs, newLog].slice(-1000);
         }
-        case "AGENT_CREATED": {
-          const existing = agents.get(event.agentId);
-          if (existing) {
-            agents.set(event.agentId, {
-              ...existing,
-              name: event.name,
-              role: event.role,
-              palette: event.palette ?? existing.palette,
-              personality: event.personality ?? existing.personality,
-              backend: event.backend ?? existing.backend,
-              isTeamLead: event.isTeamLead ?? existing.isTeamLead,
-              teamId: event.teamId ?? existing.teamId,
-              isExternal: event.isExternal ?? existing.isExternal,
-              pid: event.pid ?? existing.pid,
-              cwd: event.cwd ?? existing.cwd,
-              workDir: event.workDir ?? existing.workDir,
-              startedAt: event.startedAt ?? existing.startedAt,
-            });
-          } else {
-            // Restore saved messages from localStorage (skip for external agents)
-            const saved = event.isExternal ? undefined : loadFromStorage().get(event.agentId);
-            const agent = defaultAgent(event.agentId, event.name, event.role);
-            agent.palette = event.palette ?? saved?.palette;
-            agent.personality = event.personality ?? saved?.personality;
-            agent.backend = event.backend ?? saved?.backend;
-            agent.isTeamLead = event.isTeamLead ?? saved?.isTeamLead;
-            agent.teamId = event.teamId ?? saved?.teamId;
-            agent.isExternal = event.isExternal;
-            agent.pid = event.pid;
-            agent.cwd = event.cwd;
-            agent.workDir = event.workDir;
-            agent.startedAt = event.startedAt;
-            if (saved) {
-              agent.messages = saved.messages;
-            }
-            agents.set(event.agentId, agent);
-          }
-          // Skip localStorage persistence for external agents
-          if (!event.isExternal) {
-            // Debug: detect isTeamLead loss
-            const updated = agents.get(event.agentId);
-            if (existing?.isTeamLead && !updated?.isTeamLead) {
-              console.warn(`[Store] isTeamLead LOST for ${event.agentId}! event.isTeamLead=${event.isTeamLead}, existing=${existing.isTeamLead}`);
-              console.trace();
-            }
-            saveToStorage(agents);
-          }
-          break;
-        }
-        case "AGENT_FIRED": {
-          agents.delete(event.agentId);
-          removeFromStorage(event.agentId);
-          // Clean up team phase if this was a team lead
-          const teamPhases = new Map(state.teamPhases);
-          for (const [teamId, tp] of teamPhases) {
-            if (tp.leadAgentId === event.agentId) {
-              teamPhases.delete(teamId);
-            }
-          }
-          if (teamPhases.size !== state.teamPhases.size) {
-            saveTeamPhases(teamPhases);
-            return { agents, teamPhases };
-          }
-          break;
-        }
-        case "AGENT_STATUS": {
-          const agent = agents.get(event.agentId) ?? defaultAgent(event.agentId);
-          agents.set(event.agentId, {
-            ...agent,
-            status: event.status,
-            statusDetails: event.details ?? agent.statusDetails ?? null,
-          });
-          break;
-        }
-        case "TASK_STARTED": {
-          const agent = agents.get(event.agentId) ?? defaultAgent(event.agentId);
-          // Add a streaming placeholder message that LOG_APPEND will update in-place
-          // Finalize any stale streaming messages from previous tasks (stop them from updating)
-          const streamId = event.taskId + "-stream";
-          const hasStream = agent.messages.some((m) => m.id === streamId);
-          const staleFinalized = agent.messages.map((m) =>
-            m.id.endsWith("-stream") && m.id !== streamId
-              ? { ...m, id: m.id.replace("-stream", "-streamed") }
-              : m
-          );
-          agents.set(event.agentId, {
-            ...agent,
-            status: "working",
-            currentTaskId: event.taskId,
-            currentPrompt: event.prompt,
-            pendingApproval: null,
-            lastLogLine: null,
-            messages: hasStream ? staleFinalized : [...staleFinalized, {
-              id: streamId,
-              role: "agent" as const,
-              text: "",
-              timestamp: Date.now(),
-            }],
-          });
-          break;
-        }
-        case "APPROVAL_NEEDED": {
-          const agent = agents.get(event.agentId) ?? defaultAgent(event.agentId);
-          agents.set(event.agentId, {
-            ...agent,
-            status: "waiting_approval",
-            pendingApproval: {
-              approvalId: event.approvalId,
-              title: event.title,
-              summary: event.summary,
-              riskLevel: event.riskLevel,
-            },
-          });
-          break;
-        }
-        case "TASK_DONE": {
-          const agent = agents.get(event.agentId) ?? defaultAgent(event.agentId);
-          const replyId = event.taskId + "-reply";
-          if (agent.messages.some((m) => m.id === replyId)) break; // dedupe
 
-          // Determine if leader is in a conversational phase
-          let leaderConversational = false;
-          if (agent.isTeamLead) {
-            for (const [, tp] of state.teamPhases) {
-              if (tp.leadAgentId === event.agentId) {
-                leaderConversational = ["create", "design", "complete"].includes(tp.phase);
-                break;
-              }
+        // Capture global execution steps
+        let stepMsg = "";
+        if (e.type === "TASK_STARTED") {
+          stepMsg = `Started task: "${e.prompt.slice(0, 100)}${e.prompt.length > 100 ? "..." : ""}"`;
+        } else if (e.type === "TASK_DONE") {
+          stepMsg = `Completed task successfully: ${e.result.summary.slice(0, 100)}${e.result.summary.length > 100 ? "..." : ""}`;
+        } else if (e.type === "TASK_FAILED") {
+          stepMsg = `Task failed: "${e.error}"`;
+        } else if (e.type === "TOOL_STARTED") {
+          stepMsg = `Invoked tool "${e.tool}" with input: "${e.input ? e.input.slice(0, 100) : ""}"`;
+        } else if (e.type === "TOOL_FINISHED") {
+          stepMsg = `Tool "${e.tool}" finished (${e.success ? "success" : "failed"})`;
+        } else if (e.type === "AGENT_STATUS") {
+          stepMsg = `Status changed to ${e.status}${e.details ? `: ${e.details}` : ""}`;
+        }
+
+        if (stepMsg) {
+          const newStep = {
+            id: nanoid(),
+            agentId: (e as { agentId?: string }).agentId || "system",
+            type: e.type,
+            message: stepMsg,
+            timestamp: Date.now(),
+          };
+          const currentSteps = partialState.executionSteps || state.executionSteps || [];
+          partialState.executionSteps = [...currentSteps, newStep].slice(-500);
+        }
+
+        switch (e.type) {
+          case "AGENTS_SYNC": {
+            const validIds = new Set(e.agentIds);
+            for (const agentId of nextAgents.keys()) {
+              if (!validIds.has(agentId)) nextAgents.delete(agentId);
             }
+            break;
           }
-
-          // Finalize token usage for this task.
-          // If TOKEN_UPDATE was received during the task, agent.tokenUsage is already up-to-date
-          // (baseline + live task tokens). Just snapshot it as the new baseline.
-          // If no TOKEN_UPDATE was received (e.g. non-streaming backend), fall back to
-          // accumulating from event.result.tokenUsage.
-          const baseline = agent._tokenBaseline ?? { inputTokens: 0, outputTokens: 0 };
-          const liveUpdated = agent.tokenUsage.inputTokens > baseline.inputTokens
-            || agent.tokenUsage.outputTokens > baseline.outputTokens;
-          const updatedTokenUsage = liveUpdated
-            ? agent.tokenUsage  // TOKEN_UPDATE already set the correct value
-            : (event.result.tokenUsage
-              ? {
-                  inputTokens: agent.tokenUsage.inputTokens + event.result.tokenUsage.inputTokens,
-                  outputTokens: agent.tokenUsage.outputTokens + event.result.tokenUsage.outputTokens,
-                }
-              : agent.tokenUsage);
-
-          // Team lead intermediate completions in EXECUTE phase (delegating, processing results)
-          // should not appear as chat messages — only the final summary matters.
-          // In conversational phases (create, design, complete), always show the message.
-          if (agent.isTeamLead && !event.isFinalResult && !leaderConversational) {
-            // Finalize streaming message for intermediate leader task (keep it visible)
-            const intStreamId = event.taskId + "-stream";
-            const intStreamMsg = agent.messages.find((m) => m.id === intStreamId);
-            // Mark streaming message as finalized by removing the -stream suffix
-            const finalizedMsgs = intStreamMsg
-              ? agent.messages.map((m) => m.id === intStreamId ? { ...m, id: intStreamId.replace("-stream", "-streamed") } : m)
-              : agent.messages;
-            agents.set(event.agentId, {
+          case "META_THOUGHT": {
+            const agent = nextAgents.get(e.agentId) ?? defaultAgent(e.agentId);
+            nextAgents.set(e.agentId, {
               ...agent,
-              status: "working",
-              currentTaskId: null,
-              pendingApproval: null,
-              lastLogLine: event.result.summary?.slice(0, 100) ?? "Coordinating team...",
-              messages: finalizedMsgs,
-              tokenUsage: updatedTokenUsage,
-              _tokenBaseline: updatedTokenUsage,
+              messages: [...agent.messages, {
+                id: `thought-${e.timestamp}`,
+                role: "thought",
+                text: e.thought,
+                timestamp: e.timestamp,
+              }],
+            });
+            // Also add to team messages
+            const teamMsg: TeamChatMessage = {
+              id: `mt-${e.timestamp}-${e.agentId}`,
+              fromAgentId: e.agentId,
+              fromAgentName: "Meta-Agent",
+              message: e.thought,
+              messageType: "thought",
+              timestamp: e.timestamp,
+            };
+            nextTeamMessages = [...nextTeamMessages, teamMsg].slice(-200);
+            saveTeamMessages(nextTeamMessages);
+            break;
+          }
+          case "SWARM_HEALTH": {
+            Object.assign(partialState, {
+              swarmHealth: {
+                score: e.score,
+                status: e.status,
+                diagnostics: e.diagnostics,
+                recommendations: e.recommendations,
+              }
             });
             break;
           }
-
-          // Keep streaming message and append the final result after it
-          const streamId = event.taskId + "-stream";
-          const streamMsg = agent.messages.find((m) => m.id === streamId);
-          const durationMs = streamMsg ? Date.now() - streamMsg.timestamp : undefined;
-          // Use the longest available text: accumulated stream > fullOutput > summary
-          const accumulated = streamMsg?._accumulatedText ?? "";
-          const serverFull = event.result.fullOutput || event.result.summary;
-          const bestText = accumulated.length > serverFull.length ? accumulated : serverFull;
-          // Remove streaming message — final result (bestText) already contains the complete content
-          const finalizedMessages = agent.messages.filter((m) => m.id !== streamId);
-          const newMessages: ChatMessage[] = [
-            ...finalizedMessages,
-            {
-              id: replyId,
-              role: "agent",
-              text: bestText,
+          case "SWARM_REASSEMBLY": {
+            const teamMsg: TeamChatMessage = {
+              id: `sr-${Date.now()}-${e.teamId}`,
+              fromAgentId: "system",
+              fromAgentName: "Swarm Orchestrator",
+              message: `⚠️ Autonomous Re-assembly Triggered for team ${e.teamId}. New strategic focus: ${e.newTeamName}.`,
+              messageType: "status",
               timestamp: Date.now(),
-              result: event.result,
-              isFinalResult: event.isFinalResult,
-              durationMs,
-            },
-          ];
-          agents.set(event.agentId, {
-            ...agent,
-            status: "done",
-            currentTaskId: null,
-            pendingApproval: null,
-            lastLogLine: null,
-            messages: newMessages,
-            tokenUsage: updatedTokenUsage,
-            _tokenBaseline: updatedTokenUsage,
-          });
-          saveToStorage(agents);
-          break;
-        }
-        case "TASK_FAILED": {
-          const agent = agents.get(event.agentId) ?? defaultAgent(event.agentId);
-          const errorId = event.taskId + "-error";
-          if (agent.messages.some((m) => m.id === errorId)) break; // dedupe
-          const isCancelled = event.error === "Task cancelled by user";
-          const displayText = isCancelled
-            ? "Current task has been cancelled. Tell me continue to pick up where I left off, or start something entirely new."
-            : event.error;
-          // Finalize streaming message (keep it visible, stop updates)
-          const failStreamId = event.taskId + "-stream";
-          const finalizedMessages = agent.messages.map((m) =>
-            m.id === failStreamId ? { ...m, id: failStreamId.replace("-stream", "-streamed") } : m
-          );
-          agents.set(event.agentId, {
-            ...agent,
-            status: "error",
-            currentTaskId: null,
-            pendingApproval: null,
-            lastLogLine: null,
-            messages: [...finalizedMessages, {
-              id: errorId,
-              role: "system",
-              text: displayText,
-              timestamp: Date.now(),
-            }],
-          });
-          saveToStorage(agents);
-          break;
-        }
-        case "TASK_DELEGATED": {
-          const fromAgent = agents.get(event.fromAgentId);
-          const toAgent = agents.get(event.toAgentId);
-          const delegateId = event.taskId + "-delegate";
-
-          // Add system message to the source agent's chat (e.g. Marcus: "Delegated to Alex: ...")
-          if (fromAgent && !fromAgent.messages.some((m) => m.id === delegateId)) {
-            agents.set(event.fromAgentId, {
-              ...fromAgent,
-              messages: [...fromAgent.messages, {
-                id: delegateId,
-                role: "system",
-                text: `Delegated to ${toAgent?.name ?? event.toAgentId}: ${event.prompt}`,
-                timestamp: Date.now(),
-              }],
-            });
-          }
-
-          // Add incoming task message to the target agent's chat (e.g. Alex sees what Marcus asked)
-          const receivedId = event.taskId + "-received";
-          const targetAgent = agents.get(event.toAgentId) ?? defaultAgent(event.toAgentId);
-          if (!targetAgent.messages.some((m) => m.id === receivedId)) {
-            agents.set(event.toAgentId, {
-              ...targetAgent,
-              messages: [...targetAgent.messages, {
-                id: receivedId,
-                role: "user",
-                text: `[From ${fromAgent?.name ?? event.fromAgentId}] ${event.prompt}`,
-                timestamp: Date.now(),
-              }],
-            });
-          }
-          saveToStorage(agents);
-          break;
-        }
-        case "LOG_APPEND": {
-          const agent = agents.get(event.agentId);
-          if (!agent || !event.chunk) break;
-          agents.set(event.agentId, { ...agent, lastLogLine: event.chunk });
-
-          // Update the streaming message — append new lines to build up output
-          const streamId = agent.currentTaskId ? agent.currentTaskId + "-stream" : null;
-          const lastMsg = agent.messages.length > 0 ? agent.messages[agent.messages.length - 1] : null;
-          if (streamId && lastMsg?.id === streamId) {
-            // Accumulate all output for full terminal-style display
-            const prev = lastMsg._accumulatedText ?? "";
-            const accumulated = prev ? prev + "\n" + event.chunk : event.chunk;
-            const updatedMessages = [...agent.messages];
-            updatedMessages[updatedMessages.length - 1] = {
-              ...lastMsg,
-              text: accumulated,
-              timestamp: Date.now(),
-              _accumulatedText: accumulated,
             };
-            agents.set(event.agentId, { ...agents.get(event.agentId)!, messages: updatedMessages });
-          } else if (agent.isExternal) {
-            // External agents: accumulate text into the latest agent message (no task:done to replace)
-            const now = Date.now();
-            if (lastMsg && lastMsg.role === "agent" && (now - lastMsg.timestamp) < 10000) {
-              // Append new content to existing message
-              const prev = lastMsg.text;
-              const newText = prev ? prev + "\n" + event.chunk : event.chunk;
-              const updatedMessages = [...agent.messages];
-              updatedMessages[updatedMessages.length - 1] = { ...lastMsg, text: newText, timestamp: now };
-              agents.set(event.agentId, { ...agents.get(event.agentId)!, messages: updatedMessages });
-            } else {
-              // New message block (gap > 10 seconds = new "turn")
-              agents.set(event.agentId, {
-                ...agents.get(event.agentId)!,
-                messages: [...agents.get(event.agentId)!.messages, { id: `ext-log-${now}`, role: "agent", text: event.chunk, timestamp: now }],
-              });
-            }
+            nextTeamMessages = [...nextTeamMessages, teamMsg].slice(-200);
+            saveTeamMessages(nextTeamMessages);
+            break;
           }
-          break;
-        }
-        case "TASK_RESULT_RETURNED": {
-          // Add system message to originator's chat showing returned result
-          const originator = agents.get(event.toAgentId);
-          if (originator) {
-            const fromAgent = agents.get(event.fromAgentId);
-            const resultId = event.taskId + "-result-return";
-            if (!originator.messages.some((m) => m.id === resultId)) {
-              const statusWord = event.success ? "completed" : "failed";
-              agents.set(event.toAgentId, {
-                ...originator,
-                messages: [...originator.messages, {
-                  id: resultId,
+          case "BACKENDS_SYNC": {
+            Object.assign(partialState, { backendOptions: e.backends });
+            break;
+          }
+          case "KEY_STATUS_DATA": {
+            Object.assign(partialState, { keyStatus: e.summary });
+            break;
+          }
+          case "CONFIG_DATA":
+          case "CONFIG_UPDATED": {
+            Object.assign(partialState, { config: e.config });
+            break;
+          }
+          case "AGENT_CREATED": {
+            const existing = nextAgents.get(e.agentId);
+            if (existing) {
+              nextAgents.set(e.agentId, {
+                ...existing,
+                name: e.name,
+                role: e.role,
+                palette: e.palette ?? existing.palette,
+                personality: e.personality ?? existing.personality,
+                backend: e.backend ?? existing.backend,
+                isTeamLead: e.isTeamLead ?? existing.isTeamLead,
+                teamId: e.teamId ?? existing.teamId,
+                isExternal: e.isExternal ?? existing.isExternal,
+                pid: e.pid ?? existing.pid,
+                cwd: e.cwd ?? existing.cwd,
+                workDir: e.workDir ?? existing.workDir,
+                startedAt: e.startedAt ?? existing.startedAt,
+              });
+            } else {
+              const saved = e.isExternal ? undefined : loadFromStorage().get(e.agentId);
+              const agent = defaultAgent(e.agentId, e.name, e.role);
+              agent.palette = e.palette ?? saved?.palette;
+              agent.personality = e.personality ?? saved?.personality;
+              agent.backend = e.backend ?? saved?.backend;
+              agent.isTeamLead = e.isTeamLead ?? saved?.isTeamLead;
+              agent.teamId = e.teamId ?? saved?.teamId;
+              agent.isExternal = e.isExternal;
+              agent.pid = e.pid;
+              agent.cwd = e.cwd;
+              agent.workDir = e.workDir;
+              agent.startedAt = e.startedAt;
+              if (saved) agent.messages = saved.messages;
+              nextAgents.set(e.agentId, agent);
+            }
+            if (!e.isExternal) saveToStorage(nextAgents);
+            break;
+          }
+          case "AGENT_FIRED": {
+            nextAgents.delete(e.agentId);
+            removeFromStorage(e.agentId);
+            for (const [teamId, tp] of nextTeamPhases) {
+              if (tp.leadAgentId === e.agentId) nextTeamPhases.delete(teamId);
+            }
+            saveTeamPhases(nextTeamPhases);
+            break;
+          }
+          case "AGENT_STATUS": {
+            const agent = nextAgents.get(e.agentId) ?? defaultAgent(e.agentId);
+            nextAgents.set(e.agentId, {
+              ...agent,
+              status: e.status,
+              statusDetails: e.details ?? agent.statusDetails ?? null,
+              isFailover: e.isFailover ?? agent.isFailover,
+            });
+            break;
+          }
+          case "TASK_STARTED": {
+            const agent = nextAgents.get(e.agentId) ?? defaultAgent(e.agentId);
+            const streamId = e.taskId + "-stream";
+            const hasStream = agent.messages.some((m) => m.id === streamId);
+            const staleFinalized = agent.messages.map((m) =>
+              m.id.endsWith("-stream") && m.id !== streamId
+                ? { ...m, id: m.id.replace("-stream", "-streamed") }
+                : m
+            );
+            nextAgents.set(e.agentId, {
+              ...agent,
+              status: "working",
+              currentTaskId: e.taskId,
+              currentPrompt: e.prompt,
+              pendingApproval: null,
+              lastLogLine: null,
+              messages: hasStream ? staleFinalized : [...staleFinalized, {
+                id: streamId,
+                role: "agent" as const,
+                text: "",
+                timestamp: Date.now(),
+              }],
+            });
+            break;
+          }
+          case "APPROVAL_NEEDED": {
+            const agent = nextAgents.get(e.agentId) ?? defaultAgent(e.agentId);
+            nextAgents.set(e.agentId, {
+              ...agent,
+              status: "waiting_approval",
+              pendingApproval: {
+                approvalId: e.approvalId,
+                title: e.title,
+                summary: e.summary,
+                riskLevel: e.riskLevel,
+              },
+            });
+            break;
+          }
+          case "TASK_DONE": {
+            const agent = nextAgents.get(e.agentId) ?? defaultAgent(e.agentId);
+            const replyId = e.taskId + "-reply";
+            if (agent.messages.some((m) => m.id === replyId)) break;
+
+            let leaderConversational = false;
+            if (agent.isTeamLead) {
+              for (const [, tp] of nextTeamPhases) {
+                if (tp.leadAgentId === e.agentId) {
+                  leaderConversational = ["create", "design", "complete"].includes(tp.phase);
+                  break;
+                }
+              }
+            }
+
+            const baseline = agent._tokenBaseline ?? { inputTokens: 0, outputTokens: 0 };
+            const liveUpdated = agent.tokenUsage.inputTokens > baseline.inputTokens || agent.tokenUsage.outputTokens > baseline.outputTokens;
+            const updatedTokenUsage = liveUpdated ? agent.tokenUsage : (e.result.tokenUsage ? {
+              inputTokens: agent.tokenUsage.inputTokens + e.result.tokenUsage.inputTokens,
+              outputTokens: agent.tokenUsage.outputTokens + e.result.tokenUsage.outputTokens,
+            } : agent.tokenUsage);
+
+            if (agent.isTeamLead && !e.isFinalResult && !leaderConversational) {
+              const intStreamId = e.taskId + "-stream";
+              const intStreamMsg = agent.messages.find((m) => m.id === intStreamId);
+              const finalizedMsgs = intStreamMsg
+                ? agent.messages.map((m) => m.id === intStreamId ? { ...m, id: intStreamId.replace("-stream", "-streamed") } : m)
+                : agent.messages;
+              nextAgents.set(e.agentId, {
+                ...agent,
+                status: "working",
+                currentTaskId: null,
+                pendingApproval: null,
+                lastLogLine: e.result.summary?.slice(0, 100) ?? "Coordinating team...",
+                messages: finalizedMsgs,
+                tokenUsage: updatedTokenUsage,
+                _tokenBaseline: updatedTokenUsage,
+              });
+              break;
+            }
+
+            const streamId = e.taskId + "-stream";
+            const streamMsg = agent.messages.find((m) => m.id === streamId);
+            const durationMs = streamMsg ? Date.now() - streamMsg.timestamp : undefined;
+            const accumulated = streamMsg?._accumulatedText ?? "";
+            const serverFull = e.result.fullOutput || e.result.summary;
+            const bestText = accumulated.length > serverFull.length ? accumulated : serverFull;
+            const finalizedMessages = agent.messages.filter((m) => m.id !== streamId);
+            nextAgents.set(e.agentId, {
+              ...agent,
+              status: "done",
+              currentTaskId: null,
+              pendingApproval: null,
+              lastLogLine: null,
+              messages: [...finalizedMessages, {
+                id: replyId,
+                role: "agent",
+                text: bestText,
+                timestamp: Date.now(),
+                result: e.result,
+                isFinalResult: e.isFinalResult,
+                durationMs,
+              }],
+              tokenUsage: updatedTokenUsage,
+              _tokenBaseline: updatedTokenUsage,
+            });
+            saveToStorage(nextAgents);
+            break;
+          }
+          case "TASK_FAILED": {
+            const agent = nextAgents.get(e.agentId) ?? defaultAgent(e.agentId);
+            const errorId = e.taskId + "-error";
+            if (agent.messages.some((m) => m.id === errorId)) break;
+            const displayText = e.error === "Task cancelled by user" ? "Current task has been cancelled. Tell me continue to pick up where I left off, or start something entirely new." : e.error;
+            const failStreamId = e.taskId + "-stream";
+            const finalizedMessages = agent.messages.map((m) => m.id === failStreamId ? { ...m, id: failStreamId.replace("-stream", "-streamed") } : m);
+            nextAgents.set(e.agentId, {
+              ...agent,
+              status: "error",
+              currentTaskId: null,
+              pendingApproval: null,
+              lastLogLine: null,
+              messages: [...finalizedMessages, {
+                id: errorId,
+                role: "system",
+                text: displayText,
+                timestamp: Date.now(),
+              }],
+            });
+            saveToStorage(nextAgents);
+            break;
+          }
+          case "TASK_DELEGATED": {
+            const fromAgent = nextAgents.get(e.fromAgentId);
+            const toAgent = nextAgents.get(e.toAgentId);
+            const delegateId = e.taskId + "-delegate";
+            if (fromAgent && !fromAgent.messages.some((m) => m.id === delegateId)) {
+              nextAgents.set(e.fromAgentId, {
+                ...fromAgent,
+                messages: [...fromAgent.messages, {
+                  id: delegateId,
                   role: "system",
-                  text: `Result from ${fromAgent?.name ?? event.fromAgentId} (${statusWord}): ${event.summary.slice(0, 500)}`,
+                  text: `Delegated to ${toAgent?.name ?? e.toAgentId}: ${e.prompt}`,
                   timestamp: Date.now(),
                 }],
               });
             }
+            const receivedId = e.taskId + "-received";
+            const targetAgent = nextAgents.get(e.toAgentId) ?? defaultAgent(e.toAgentId);
+            if (!targetAgent.messages.some((m) => m.id === receivedId)) {
+              nextAgents.set(e.toAgentId, {
+                ...targetAgent,
+                messages: [...targetAgent.messages, {
+                  id: receivedId,
+                  role: "user",
+                  text: `[From ${fromAgent?.name ?? e.fromAgentId}] ${e.prompt}`,
+                  timestamp: Date.now(),
+                }],
+              });
+            }
+            const packet: DataPacket = { id: nanoid(), from: e.fromAgentId, to: e.toAgentId, type: "delegation", timestamp: Date.now() };
+            Object.assign(partialState, { activePackets: [...(partialState.activePackets || state.activePackets), packet] });
+            setTimeout(() => {
+              set((s) => ({ activePackets: s.activePackets.filter(p => p.id !== packet.id) }));
+            }, 2500);
+            saveToStorage(nextAgents);
+            break;
           }
-          break;
-        }
-        case "TEAM_CHAT": {
-          const fromAgent = agents.get(event.fromAgentId);
-          const toAgent = event.toAgentId ? agents.get(event.toAgentId) : undefined;
-          const teamMsg: TeamChatMessage = {
-            id: `tc-${event.timestamp}-${event.fromAgentId}-${event.messageType}-${event.toAgentId ?? ""}`,
-            fromAgentId: event.fromAgentId,
-            fromAgentName: fromAgent?.name ?? event.fromAgentId,
-            toAgentId: event.toAgentId,
-            toAgentName: toAgent?.name ?? event.toAgentId,
-            message: event.message,
-            messageType: event.messageType,
-            timestamp: event.timestamp,
-          };
-          if (state.teamMessages.some((m) => m.id === teamMsg.id)) break;
-          const newTeamMessages = [...state.teamMessages, teamMsg];
-          saveTeamMessages(newTeamMessages);
-          return { agents, teamMessages: newTeamMessages };
-        }
-        case "TASK_QUEUED": {
-          const agent = agents.get(event.agentId) ?? defaultAgent(event.agentId);
-          const queuedId = event.taskId + "-queued";
-          if (!agent.messages.some((m) => m.id === queuedId)) {
-            agents.set(event.agentId, {
-              ...agent,
-              messages: [...agent.messages, {
-                id: queuedId,
-                role: "system",
-                text: `Task queued (position #${event.position}): ${event.prompt.slice(0, 100)}`,
+          case "LOG_APPEND": {
+            const agent = nextAgents.get(e.agentId);
+            if (!agent || !e.chunk) break;
+            nextAgents.set(e.agentId, { ...agent, lastLogLine: e.chunk });
+            const streamId = agent.currentTaskId ? agent.currentTaskId + "-stream" : null;
+            const lastMsg = agent.messages.length > 0 ? agent.messages[agent.messages.length - 1] : null;
+            if (streamId && lastMsg?.id === streamId) {
+              const prev = lastMsg._accumulatedText ?? "";
+              const accumulated = prev ? prev + "\n" + e.chunk : e.chunk;
+              const updatedMessages = [...agent.messages];
+              updatedMessages[updatedMessages.length - 1] = {
+                ...lastMsg,
+                text: accumulated,
                 timestamp: Date.now(),
-              }],
+                _accumulatedText: accumulated,
+              };
+              nextAgents.set(e.agentId, { ...agent, messages: updatedMessages });
+            } else if (agent.isExternal) {
+              const now = Date.now();
+              if (lastMsg && lastMsg.role === "agent" && (now - lastMsg.timestamp) < 10000) {
+                const newText = (lastMsg.text ? lastMsg.text + "\n" : "") + e.chunk;
+                const updatedMessages = [...agent.messages];
+                updatedMessages[updatedMessages.length - 1] = { ...lastMsg, text: newText, timestamp: now };
+                nextAgents.set(e.agentId, { ...agent, messages: updatedMessages });
+              } else {
+                nextAgents.set(e.agentId, {
+                  ...agent,
+                  messages: [...agent.messages, { id: `ext-log-${now}`, role: "agent", text: e.chunk, timestamp: now }],
+                });
+              }
+            }
+            break;
+          }
+          case "TASK_RESULT_RETURNED": {
+            const originator = nextAgents.get(e.toAgentId);
+            if (originator) {
+              const fromAgent = nextAgents.get(e.fromAgentId);
+              const resultId = e.taskId + "-result-return";
+              if (!originator.messages.some((m) => m.id === resultId)) {
+                nextAgents.set(e.toAgentId, {
+                  ...originator,
+                  messages: [...originator.messages, {
+                    id: resultId,
+                    role: "system",
+                    text: `Result from ${fromAgent?.name ?? e.fromAgentId} (${e.success ? "completed" : "failed"}): ${e.summary.slice(0, 500)}`,
+                    timestamp: Date.now(),
+                  }],
+                });
+              }
+            }
+            const packet: DataPacket = { id: nanoid(), from: e.fromAgentId, to: e.toAgentId, type: "result", timestamp: Date.now() };
+            Object.assign(partialState, { activePackets: [...(partialState.activePackets || state.activePackets), packet] });
+            setTimeout(() => {
+              set((s) => ({ activePackets: s.activePackets.filter(p => p.id !== packet.id) }));
+            }, 2500);
+            saveToStorage(nextAgents);
+            break;
+          }
+          case "TEAM_CHAT": {
+            const fromAgent = nextAgents.get(e.fromAgentId);
+            const toAgent = e.toAgentId ? nextAgents.get(e.toAgentId) : undefined;
+            const teamMsg: TeamChatMessage = {
+              id: `tc-${e.timestamp}-${e.fromAgentId}-${e.messageType}-${e.toAgentId ?? ""}`,
+              fromAgentId: e.fromAgentId,
+              fromAgentName: fromAgent?.name ?? e.fromAgentId,
+              toAgentId: e.toAgentId,
+              toAgentName: toAgent?.name ?? e.toAgentId,
+              message: e.message,
+              messageType: e.messageType,
+              timestamp: e.timestamp,
+            };
+            if (!nextTeamMessages.some((m) => m.id === teamMsg.id)) {
+              nextTeamMessages = [...nextTeamMessages, teamMsg];
+              saveTeamMessages(nextTeamMessages);
+            }
+            break;
+          }
+          case "TASK_QUEUED": {
+            const agent = nextAgents.get(e.agentId) ?? defaultAgent(e.agentId);
+            const queuedId = e.taskId + "-queued";
+            if (!agent.messages.some((m) => m.id === queuedId)) {
+              nextAgents.set(e.agentId, {
+                ...agent,
+                messages: [...agent.messages, {
+                  id: queuedId,
+                  role: "system",
+                  text: `Task queued (position #${e.position}): ${e.prompt.slice(0, 100)}`,
+                  timestamp: Date.now(),
+                }],
+              });
+            }
+            break;
+          }
+          case "TOKEN_UPDATE": {
+            const agent = nextAgents.get(e.agentId) ?? defaultAgent(e.agentId);
+            const baseline = agent._tokenBaseline ?? { inputTokens: 0, outputTokens: 0 };
+            nextAgents.set(e.agentId, {
+              ...agent,
+              tokenUsage: {
+                inputTokens: baseline.inputTokens + e.inputTokens,
+                outputTokens: baseline.outputTokens + e.outputTokens,
+              },
             });
+            break;
           }
-          break;
-        }
-        case "TOKEN_UPDATE": {
-          const agent = agents.get(event.agentId) ?? defaultAgent(event.agentId);
-          // Live per-task cumulative values — track baseline from completed tasks
-          // so multi-task agents accumulate correctly
-          const baseline = agent._tokenBaseline ?? { inputTokens: 0, outputTokens: 0 };
-          agents.set(event.agentId, {
-            ...agent,
-            tokenUsage: {
-              inputTokens: baseline.inputTokens + event.inputTokens,
-              outputTokens: baseline.outputTokens + event.outputTokens,
-            },
-          });
-          break;
-        }
-        case "AGENT_DEFS": {
-          return { agents, agentDefs: event.agents };
-        }
-        case "TEAM_PHASE": {
-          const teamPhases = new Map(state.teamPhases);
-          teamPhases.set(event.teamId, { phase: event.phase, leadAgentId: event.leadAgentId });
-          saveTeamPhases(teamPhases);
-          return { agents, teamPhases };
-        }
-        case "SUGGESTION": {
-          const newSuggestions = [...state.suggestions, { text: event.text, author: event.author, timestamp: event.timestamp }];
-          // Cap at 50
-          if (newSuggestions.length > 50) newSuggestions.shift();
-          return { agents, suggestions: newSuggestions };
-        }
-        case "PREVIEW_READY": {
-          return { agents, pendingPreviewUrl: event.url };
-        }
-        case "FOLDER_PICKED": {
-          const cb = folderPickCallbacks.get(event.requestId);
-          if (cb) {
-            cb(event.path);
-            folderPickCallbacks.delete(event.requestId);
+          case "AGENT_DEFS": {
+            Object.assign(partialState, { agentDefs: e.agents });
+            break;
           }
-          return { agents };
-        }
-        case "IMAGE_UPLOADED": {
-          const cb = imageUploadCallbacks.get(event.requestId);
-          if (cb) {
-            cb(event.path);
-            imageUploadCallbacks.delete(event.requestId);
+          case "TEAM_PHASE": {
+            nextTeamPhases.set(e.teamId, { phase: e.phase, leadAgentId: e.leadAgentId });
+            saveTeamPhases(nextTeamPhases);
+            break;
           }
-          return { agents };
-        }
-        case "PROJECT_LIST": {
-          return { agents, projectList: event.projects };
-        }
-        case "PROJECT_DATA": {
-          return {
-            agents,
-            viewingProjectId: event.projectId,
-            viewingProjectName: event.name,
-            viewingProjectEvents: event.events as GatewayEvent[],
-          };
+          case "SUGGESTION": {
+            nextSuggestions = [...nextSuggestions, { text: e.text, author: e.author, timestamp: e.timestamp }].slice(-50);
+            Object.assign(partialState, { suggestions: nextSuggestions });
+            break;
+          }
+          case "PREVIEW_READY": {
+            Object.assign(partialState, { pendingPreviewUrl: e.url });
+            break;
+          }
+          case "FOLDER_PICKED": {
+            const cb = folderPickCallbacks.get(e.requestId);
+            if (cb) {
+              cb(e.path);
+              folderPickCallbacks.delete(e.requestId);
+            }
+            break;
+          }
+          case "IMAGE_UPLOADED": {
+            const cb = imageUploadCallbacks.get(e.requestId);
+            if (cb) {
+              cb(e.path);
+              imageUploadCallbacks.delete(e.requestId);
+            }
+            break;
+          }
+          case "PROJECT_LIST": {
+            Object.assign(partialState, { projectList: e.projects });
+            break;
+          }
+          case "PROJECT_DATA": {
+            Object.assign(partialState, {
+              viewingProjectId: e.projectId,
+              viewingProjectName: e.name,
+              viewingProjectEvents: e.events as GatewayEvent[],
+            });
+            break;
+          }
+          case "KNOWLEDGE_SYNCED": {
+            Object.assign(partialState, {
+              knowledgeContent: e.content,
+              knowledgeDir: e.projectDir,
+            });
+            break;
+          }
         }
       }
 
-      return { agents };
+      return {
+        ...partialState,
+        agents: nextAgents,
+        teamMessages: nextTeamMessages,
+        teamPhases: nextTeamPhases,
+        suggestions: nextSuggestions,
+      };
     });
   },
 }));

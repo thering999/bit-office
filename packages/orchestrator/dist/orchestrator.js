@@ -1,0 +1,1112 @@
+import { EventEmitter } from "events";
+import { nanoid } from "nanoid";
+import { CONFIG } from "./config.js";
+import { AgentSession, clearSessionId } from "./agent-session.js";
+import { AgentManager } from "./agent-manager.js";
+import { DelegationRouter } from "./delegation.js";
+import { PromptEngine } from "./prompt-templates.js";
+import { RetryTracker } from "./retry.js";
+import { PhaseMachine } from "./phase-machine.js";
+import { finalizeTeamResult } from "./result-finalizer.js";
+import { createWorktree, mergeWorktree, removeWorktree } from "./worktree.js";
+import { recordReviewFeedback, recordProjectCompletion, recordTechPreference, getMemoryContext } from "./memory.js";
+import { VectorMemory } from "./vector-memory.js";
+import { VisualPerception } from "./visual-perception.js";
+import { ReflectionEngine } from "./reflection-engine.js";
+import { AutoHealer } from "./auto-healer.js";
+import { MetaAgent } from "./meta-agent.js";
+import { MetaArchitect } from "./meta-architect.js";
+import { MetaSwarm } from "./meta-swarm.js";
+import { SnapshotManager } from "./snapshot-manager.js";
+import { SwarmDoctor } from "./doctor.js";
+import { bus } from "@office/shared/infra/bus";
+import { knowledgeManager } from "./knowledge-manager.js";
+export class Orchestrator extends EventEmitter {
+    agentManager = new AgentManager();
+    delegationRouter;
+    promptEngine;
+    retryTracker;
+    phaseMachine = new PhaseMachine();
+    backends = new Map();
+    defaultBackendId;
+    workspace;
+    sandboxMode;
+    worktreeEnabled;
+    worktreeMerge;
+    /** Preview info captured from the first dev worker that produces one — not from QA/reviewer */
+    teamPreview = null;
+    /** Accumulated changedFiles from all workers in the current team session */
+    teamChangedFiles = new Set();
+    /** Guard against emitting isFinalResult more than once per execute cycle. */
+    teamFinalized = false;
+    vectorMemory = null;
+    visualPerception = null;
+    autoHealer = null;
+    reflectionEngine;
+    reflectingTasks = new Set();
+    metaAgent;
+    metaArchitect;
+    snapshotManager;
+    swarmDoctor;
+    metaSwarm = null;
+    teamId = null;
+    useVision;
+    briefingTimer = null;
+    onBackendFailure;
+    onBackendCheck;
+    constructor(opts) {
+        super();
+        this.workspace = opts.workspace;
+        this.sandboxMode = opts.sandboxMode ?? "full";
+        this.onBackendFailure = opts.onBackendFailure;
+        this.onBackendCheck = opts.onBackendCheck;
+        // Register backends
+        for (const b of opts.backends) {
+            this.backends.set(b.id, b);
+        }
+        console.log(`[Orchestrator] Registered backends: ${Array.from(this.backends.keys()).join(", ")}`);
+        this.defaultBackendId = opts.defaultBackendId ?? opts.backends[0]?.id ?? "claude";
+        this.useVision = opts.useVision ?? true;
+        if (CONFIG.memory.enabled) {
+            this.vectorMemory = new VectorMemory();
+            this.vectorMemory.init().catch(() => { });
+        }
+        if (this.useVision) {
+            this.visualPerception = new VisualPerception();
+        }
+        this.autoHealer = new AutoHealer(this.agentManager, (agentId, taskId, prompt) => this.runTask(agentId, { prompt, taskId }));
+        this.metaAgent = new MetaAgent(this.backends, this.defaultBackendId, (thought) => {
+            this.emitEvent({
+                type: "meta:thought",
+                agentId: "system",
+                thought,
+                timestamp: Date.now()
+            });
+        });
+        this.metaArchitect = new MetaArchitect(this.agentManager, this.metaAgent, (prompt) => this.assembleAndCreateTeam(prompt));
+        this.snapshotManager = new SnapshotManager();
+        this.swarmDoctor = new SwarmDoctor(this.workspace);
+        this.reflectionEngine = new ReflectionEngine();
+        // Start background loops
+        this.startLoops();
+        // Prompt engine
+        this.promptEngine = new PromptEngine(opts.promptsDir);
+        this.promptEngine.init();
+        // Worktree (must be before delegation router which needs these values)
+        if (opts.worktree === false) {
+            this.worktreeEnabled = false;
+            this.worktreeMerge = false;
+        }
+        else {
+            this.worktreeEnabled = true;
+            this.worktreeMerge = opts.worktree?.mergeOnComplete ?? true;
+        }
+        // Delegation
+        this.delegationRouter = new DelegationRouter(this.agentManager, this.promptEngine, (e) => this.emitEvent(e), this.worktreeEnabled, this.worktreeMerge);
+        // Retry
+        if (opts.retry === false) {
+            this.retryTracker = null;
+        }
+        else {
+            const r = opts.retry ?? {};
+            this.retryTracker = new RetryTracker(r.maxRetries, r.escalateToLeader);
+        }
+    }
+    // ---------------------------------------------------------------------------
+    // Agent lifecycle
+    // ---------------------------------------------------------------------------
+    createAgent(opts) {
+        const backend = this.backends.get(opts.backend ?? this.defaultBackendId)
+            ?? this.backends.get(this.defaultBackendId);
+        // Inject memory context for dev workers and leaders (not reviewers)
+        const roleLower = opts.role.toLowerCase();
+        const isReviewer = roleLower.includes("review");
+        const memoryContext = !isReviewer ? getMemoryContext() : "";
+        const session = new AgentSession({
+            agentId: opts.agentId,
+            name: opts.name,
+            role: opts.role,
+            personality: opts.personality,
+            workspace: this.workspace,
+            resumeHistory: opts.resumeHistory,
+            backend,
+            sandboxMode: this.sandboxMode,
+            isTeamLead: this.agentManager.isTeamLead(opts.agentId),
+            teamId: opts.teamId,
+            memoryContext,
+            onEvent: (e) => this.handleSessionEvent(e, opts.agentId),
+            renderPrompt: (name, vars) => this.promptEngine.render(name, vars),
+        });
+        session.palette = opts.palette;
+        this.agentManager.add(session);
+        this.delegationRouter.wireAgent(session);
+        this.emitEvent({
+            type: "agent:created",
+            agentId: opts.agentId,
+            name: opts.name,
+            role: opts.role,
+            palette: opts.palette,
+            personality: opts.personality,
+            backend: backend.id,
+            isTeamLead: this.agentManager.isTeamLead(opts.agentId),
+            teamId: opts.teamId,
+        });
+        this.emitEvent({
+            type: "agent:status",
+            agentId: opts.agentId,
+            status: "idle",
+        });
+    }
+    removeAgent(agentId) {
+        const session = this.agentManager.get(agentId);
+        // Merge worktree back before removing (solo agents keep worktree alive during their lifetime)
+        if (session?.worktreePath && session.worktreeBranch && !session.teamId) {
+            try {
+                const { execSync } = require("child_process");
+                // Commit any uncommitted changes first
+                try {
+                    execSync("git add -A && git diff --cached --quiet || git commit -m 'final-save'", { cwd: session.worktreePath, stdio: "pipe", timeout: 5000 });
+                }
+                catch { /* ignore */ }
+                // Merge back to main
+                const base = session.currentWorkingDir ? require("path").dirname(require("path").dirname(session.worktreePath)) : this.workspace;
+                mergeWorktree(base, session.worktreePath, session.worktreeBranch);
+            }
+            catch (err) {
+                console.error(`[Orchestrator] Worktree merge on fire failed:`, err);
+            }
+        }
+        this.cancelTask(agentId);
+        this.delegationRouter.clearAgent(agentId);
+        this.agentManager.delete(agentId);
+        this.emitEvent({ type: "agent:fired", agentId });
+    }
+    setTeamLead(agentId) {
+        this.agentManager.setTeamLead(agentId);
+        // Update the session's isTeamLead flag
+        const session = this.agentManager.get(agentId);
+        if (session)
+            session.isTeamLead = true;
+    }
+    createTeam(opts) {
+        const presets = [
+            { ...opts.memberPresets[opts.leadPresetIndex] ?? opts.memberPresets[0], isLead: true },
+            ...opts.memberPresets.filter((_, i) => i !== opts.leadPresetIndex).map(p => ({ ...p, isLead: false })),
+        ];
+        let leadAgentId = null;
+        for (const preset of presets) {
+            const agentId = `agent-${nanoid(6)}`;
+            const backendId = opts.backends?.[String(opts.memberPresets.indexOf(preset))] ?? this.defaultBackendId;
+            this.createAgent({
+                agentId,
+                name: preset.name,
+                role: preset.role,
+                personality: preset.personality,
+                palette: preset.palette,
+                backend: backendId,
+            });
+            if (preset.isLead) {
+                leadAgentId = agentId;
+                this.agentManager.setTeamLead(agentId);
+            }
+        }
+        if (leadAgentId) {
+            this.emitEvent({
+                type: "team:chat",
+                fromAgentId: leadAgentId,
+                message: `Team created! ${presets.length} members ready.`,
+                messageType: "status",
+                timestamp: Date.now(),
+            });
+        }
+    }
+    async assembleAndCreateTeam(prompt) {
+        this.emitEvent({
+            type: "team:chat",
+            fromAgentId: "system",
+            message: "Analyzing task and assembling dynamic swarm...",
+            messageType: "status",
+            timestamp: Date.now(),
+        });
+        let context;
+        if (this.vectorMemory) {
+            context = await this.vectorMemory.getOmniContext(prompt);
+        }
+        const spec = await this.metaAgent.analyzeAndAssemble(prompt, context);
+        if (!spec || !spec.members || spec.members.length === 0) {
+            this.emitEvent({
+                type: "team:chat",
+                fromAgentId: "system",
+                message: "Failed to assemble dynamic team. Proceeding with static team.",
+                messageType: "status",
+                timestamp: Date.now(),
+            });
+            return;
+        }
+        this.emitEvent({
+            type: "team:chat",
+            fromAgentId: "system",
+            message: `Assembled "${spec.teamName}" with ${spec.members.length} members.`,
+            messageType: "status",
+            timestamp: Date.now(),
+        });
+        this.createTeam({
+            leadPresetIndex: spec.leadPresetIndex ?? 0,
+            memberPresets: spec.members.map((m) => ({
+                name: m.name,
+                role: m.role,
+                personality: m.personality,
+                palette: m.palette ?? 0
+            })),
+            backends: spec.members.reduce((acc, m, i) => {
+                acc[i] = m.backendId || this.defaultBackendId;
+                return acc;
+            }, {})
+        });
+        // Initialize and start Meta-Swarm health monitoring
+        this.teamId = spec.teamName.toLowerCase().replace(/\s+/g, "-");
+        this.metaSwarm = new MetaSwarm(this.agentManager, this.metaAgent, this.teamId);
+        this.metaSwarm.on("swarm:health", (e) => this.emitEvent(e));
+        this.metaSwarm.on("swarm:re-assembly", (spec) => this.handleSwarmReassembly(spec));
+        this.metaSwarm.startMonitoring();
+    }
+    /**
+     * Orchestrates the dynamic re-assembly of the swarm based on Meta-Agent strategy.
+     */
+    async handleSwarmReassembly(spec) {
+        this.emitEvent({
+            type: "team:chat",
+            fromAgentId: "system",
+            message: `🚨 Critical health detected. Re-assembling swarm into "${spec.teamName}"...`,
+            messageType: "status",
+            timestamp: Date.now(),
+        });
+        // 1. Identify agents to fire (those not in new spec or struggling)
+        // For now, let's just create the new ones. 
+        // In a full implementation, we would compare and surgically replace.
+        this.createTeam({
+            leadPresetIndex: spec.leadPresetIndex ?? 0,
+            memberPresets: spec.members.map((m) => ({
+                name: m.name,
+                role: m.role,
+                personality: m.personality,
+                palette: m.palette ?? 0
+            })),
+            backends: spec.members.reduce((acc, m, i) => {
+                acc[i] = m.backendId;
+                return acc;
+            }, {})
+        });
+    }
+    // ---------------------------------------------------------------------------
+    // Task execution
+    // ---------------------------------------------------------------------------
+    async runTask(agentId, opts) {
+        const session = this.agentManager.get(agentId);
+        if (!session) {
+            this.emitEvent({
+                type: "task:failed",
+                agentId,
+                taskId: opts.taskId ?? "unknown",
+                error: "Agent not found. Create it first.",
+            });
+            return;
+        }
+        const taskId = opts.taskId ?? nanoid();
+        const prompt = opts.prompt;
+        // User-initiated task on team lead: store original task + reset delegation counters
+        if (this.agentManager.isTeamLead(agentId) && !this.delegationRouter.isDelegated(taskId)) {
+            // Don't overwrite originalTask if it was pre-set (e.g. plan captured during create→design, or approved plan before execute)
+            // In design/complete phases, originalTask holds the plan — user feedback is just the prompt, not a replacement.
+            if (!session.originalTask || !opts.phaseOverride || (opts.phaseOverride !== "execute" && opts.phaseOverride !== "design" && opts.phaseOverride !== "complete")) {
+                session.originalTask = prompt;
+            }
+            // Preserve team project dir across execute cycles (set by gateway before runTask)
+            const savedProjectDir = this.delegationRouter.getTeamProjectDir();
+            this.delegationRouter.clearAll();
+            if (savedProjectDir)
+                this.delegationRouter.setTeamProjectDir(savedProjectDir);
+        }
+        let imagePath;
+        let visualContext;
+        if (this.useVision && this.visualPerception) {
+            try {
+                const screenshot = await this.visualPerception.captureState();
+                if (screenshot) {
+                    imagePath = screenshot.path;
+                    visualContext = screenshot.context;
+                }
+            }
+            catch (err) {
+                console.warn(`[Orchestrator] Visual perception failed:`, err);
+            }
+        }
+        session.runTask(taskId, prompt, opts.repoPath, this.agentManager.getTeamRoster(), this.agentManager.getChatLog(), true, opts.phaseOverride, imagePath, visualContext);
+        // Create a safety snapshot before the agent starts its work
+        if (opts.phaseOverride === "execute" || !session.teamId) {
+            try {
+                const targetPath = session.worktreePath ?? session.workspaceDir ?? "";
+                if (targetPath) {
+                    const snapshot = await this.snapshotManager.createSnapshot(targetPath, taskId);
+                    if (snapshot) {
+                        session.currentSnapshot = snapshot;
+                        console.log(`[Orchestrator] Created workspace snapshot: ${snapshot} for ${session.name}`);
+                    }
+                }
+            }
+            catch (err) {
+                console.warn(`[Orchestrator] Snapshot creation failed for ${session.name}:`, err);
+            }
+        }
+        if (opts.phaseOverride === "execute") {
+            this.teamPreview = null;
+            this.teamChangedFiles.clear();
+            this.teamFinalized = false;
+        }
+        // Track for retry
+        this.retryTracker?.track(taskId, prompt);
+        // Worktree setup:
+        // 1. Team members: created by DelegationRouter in delegation.ts (not here)
+        // 2. Solo agents sharing the same workDir: auto-isolate via worktree
+        const teamProjectDir = this.delegationRouter.getTeamProjectDir();
+        const effectiveRepo = opts?.repoPath;
+        // Worktree only for agents without existing session (new tasks only).
+        // Agents with hasHistory would break on --resume in a different CWD.
+        // Team dev worktrees are created by delegation.ts (fresh delegated tasks, no resume).
+        const isLeader = this.agentManager.isTeamLead(agentId);
+        const needsWorktree = this.worktreeEnabled && !session.worktreePath && !isLeader && !session.hasSessionHistory && (
+        // Solo agents: isolate when another solo agent shares the same repoPath
+        (!session.teamId && effectiveRepo && this.hasSoloNeighbor(agentId, effectiveRepo)));
+        if (needsWorktree) {
+            const base = session.teamId ? teamProjectDir : effectiveRepo;
+            const wt = createWorktree(base, agentId, taskId, session.name);
+            if (wt) {
+                const branch = `agent/${session.name.toLowerCase().replace(/\s+/g, "-")}/${taskId}`;
+                session.worktreePath = wt;
+                session.worktreeBranch = branch;
+                this.emitEvent({
+                    type: "worktree:created",
+                    agentId,
+                    taskId,
+                    worktreePath: wt,
+                    branch,
+                });
+            }
+        }
+    }
+    /**
+     * Check if another solo agent (no teamId) is currently working in the same repoPath.
+     */
+    hasSoloNeighbor(agentId, repoPath) {
+        for (const other of this.agentManager.getAll()) {
+            if (other.agentId === agentId || other.teamId)
+                continue;
+            if (other.currentWorkingDir === repoPath)
+                return true;
+        }
+        return false;
+    }
+    cancelTask(agentId) {
+        const session = this.agentManager.get(agentId);
+        if (!session)
+            return;
+        // Clean up worktree on cancel
+        if (session.worktreePath && session.worktreeBranch) {
+            removeWorktree(session.worktreePath, session.worktreeBranch, this.workspace);
+            session.worktreePath = null;
+            session.worktreeBranch = null;
+        }
+        session.cancelTask();
+    }
+    /**
+     * Stop all team agents — cancel their tasks but keep them alive.
+     * Safe to call before fireTeam, or to just pause work.
+     */
+    stopTeam() {
+        this.delegationRouter.stop();
+        const teamAgents = this.agentManager.getAll().filter(a => !!a.teamId);
+        for (const agent of teamAgents) {
+            this.cancelTask(agent.agentId);
+        }
+        this.emitEvent({
+            type: "team:chat",
+            fromAgentId: teamAgents.find(a => this.agentManager.isTeamLead(a.agentId))?.agentId ?? "system",
+            message: "Team work stopped. All tasks cancelled.",
+            messageType: "status",
+            timestamp: Date.now(),
+        });
+    }
+    /**
+     * Fire the entire team — stop all work silently, then remove all agents.
+     */
+    fireTeam() {
+        this.delegationRouter.stop();
+        const teamAgents = this.agentManager.getAll().filter(a => !!a.teamId);
+        for (const agent of teamAgents) {
+            this.cancelTask(agent.agentId);
+        }
+        for (const agent of teamAgents) {
+            this.agentManager.delete(agent.agentId);
+            this.emitEvent({ type: "agent:fired", agentId: agent.agentId });
+        }
+    }
+    sendMessage(agentId, message) {
+        const session = this.agentManager.get(agentId);
+        if (!session)
+            return false;
+        return session.sendMessage(message);
+    }
+    resolveApproval(approvalId, decision) {
+        for (const agent of this.agentManager.getAll()) {
+            agent.resolveApproval(approvalId, decision);
+        }
+    }
+    // ---------------------------------------------------------------------------
+    // Query
+    // ---------------------------------------------------------------------------
+    getAgent(agentId) {
+        const s = this.agentManager.get(agentId);
+        if (!s)
+            return undefined;
+        return { agentId: s.agentId, name: s.name, role: s.role, status: s.status, palette: s.palette, backend: s.backend.id, pid: s.pid, teamId: s.teamId };
+    }
+    getAllAgents() {
+        return this.agentManager.getAll().map(s => ({
+            agentId: s.agentId, name: s.name, role: s.role, status: s.status,
+            palette: s.palette, personality: s.personality, backend: s.backend.id, pid: s.pid,
+            isTeamLead: this.agentManager.isTeamLead(s.agentId),
+            teamId: s.teamId,
+        }));
+    }
+    getTeamRoster() {
+        return this.agentManager.getTeamRoster();
+    }
+    /** Return PIDs of all managed (gateway-spawned) agent processes */
+    getManagedPids() {
+        const pids = [];
+        for (const session of this.agentManager.getAll()) {
+            const pid = session.pid;
+            if (pid !== null)
+                pids.push(pid);
+        }
+        return pids;
+    }
+    isTeamLead(agentId) {
+        return this.agentManager.isTeamLead(agentId);
+    }
+    /** Get the leader's last full output (used to capture the approved plan). */
+    getLeaderLastOutput(agentId) {
+        const session = this.agentManager.get(agentId);
+        return session?.lastFullOutput ?? null;
+    }
+    /** Set team-wide project directory — all delegations will use this as cwd. */
+    setTeamProjectDir(dir) {
+        this.delegationRouter.setTeamProjectDir(dir);
+    }
+    getTeamProjectDir() {
+        return this.delegationRouter.getTeamProjectDir();
+    }
+    /** Get the original task context for the leader (the approved plan). */
+    getOriginalTask(agentId) {
+        const session = this.agentManager.get(agentId);
+        return session?.originalTask ?? null;
+    }
+    /** Set the original task context for the leader (e.g. the approved plan). */
+    setOriginalTask(agentId, task) {
+        const session = this.agentManager.get(agentId);
+        if (session)
+            session.originalTask = task;
+    }
+    /** Mark leader as having already executed (for restart recovery — uses leader-continue instead of leader-initial). */
+    setHasExecuted(agentId, value) {
+        const session = this.agentManager.get(agentId);
+        if (session)
+            session.hasExecuted = value;
+    }
+    /** Clear team members' conversation history for a fresh project cycle. */
+    clearLeaderHistory(agentId) {
+        // Always clear the leader's session from disk, even if not in agentManager
+        clearSessionId(agentId);
+        const session = this.agentManager.get(agentId);
+        if (session)
+            session.clearHistory();
+        // Clear all other agents (team workers)
+        for (const agent of this.agentManager.getAll()) {
+            if (agent.agentId !== agentId) {
+                agent.clearHistory();
+            }
+        }
+        this.delegationRouter.clearAll();
+        this.teamPreview = null;
+        this.teamChangedFiles.clear();
+        this.teamFinalized = false;
+    }
+    // ---------------------------------------------------------------------------
+    // Phase management
+    // ---------------------------------------------------------------------------
+    /**
+     * Set a team phase explicitly (for initialization and state restoration).
+     * Emits a team:phase event.
+     */
+    setTeamPhase(teamId, phase, leadAgentId) {
+        const info = this.phaseMachine.setPhase(teamId, phase, leadAgentId);
+        this.emitEvent({ type: "team:phase", teamId: info.teamId, phase: info.phase, leadAgentId: info.leadAgentId });
+    }
+    /**
+     * Approve the plan — transitions design → execute, captures plan, creates project dir context.
+     * Returns the team phase info, or null if no matching team.
+     */
+    approvePlan(leadAgentId) {
+        // Capture the approved plan as originalTask
+        const approvedPlan = this.getLeaderLastOutput(leadAgentId);
+        if (approvedPlan) {
+            this.setOriginalTask(leadAgentId, approvedPlan);
+        }
+        const info = this.phaseMachine.approvePlan(leadAgentId);
+        if (!info)
+            return null;
+        this.emitEvent({ type: "team:phase", teamId: info.teamId, phase: info.phase, leadAgentId: info.leadAgentId });
+        return { teamId: info.teamId, phase: info.phase };
+    }
+    /**
+     * Get the phase override for a team lead when running a task.
+     * Handles complete → execute transition automatically.
+     */
+    getPhaseOverrideForLeader(leadAgentId) {
+        if (!this.agentManager.isTeamLead(leadAgentId))
+            return undefined;
+        const result = this.phaseMachine.handleUserMessage(leadAgentId);
+        if (!result)
+            return undefined;
+        // If transition occurred (complete → execute), emit event
+        if (result.transitioned) {
+            this.emitEvent({ type: "team:phase", teamId: result.phaseInfo.teamId, phase: result.phaseOverride, leadAgentId });
+        }
+        return result.phaseOverride;
+    }
+    /**
+     * Get current phase for a team leader.
+     */
+    getTeamPhase(leadAgentId) {
+        return this.phaseMachine.getPhaseForLeader(leadAgentId)?.phase;
+    }
+    /**
+     * Get all team phase info (for state persistence/broadcasting).
+     */
+    getAllTeamPhases() {
+        return this.phaseMachine.getAllPhases();
+    }
+    /**
+     * Clear a specific team's phase (FIRE_TEAM).
+     */
+    clearTeamPhase(teamId) {
+        this.phaseMachine.clear(teamId);
+    }
+    /**
+     * Clear all team phases.
+     */
+    clearAllTeamPhases() {
+        this.phaseMachine.clearAll();
+    }
+    // ---------------------------------------------------------------------------
+    // Cleanup
+    // ---------------------------------------------------------------------------
+    destroy() {
+        for (const agent of this.agentManager.getAll()) {
+            if (agent.worktreePath && agent.worktreeBranch) {
+                removeWorktree(agent.worktreePath, agent.worktreeBranch, this.workspace);
+            }
+            agent.destroy();
+        }
+    }
+    async runDoctor() {
+        this.emitEvent({
+            type: "team:chat",
+            fromAgentId: "system",
+            message: "🏥 Swarm Doctor: Starting full system diagnostic...",
+            messageType: "status",
+            timestamp: Date.now(),
+        });
+        const results = await this.swarmDoctor.diagnose();
+        for (const res of results) {
+            const emoji = res.status === "ok" ? "✅" : res.status === "warn" ? "⚠️" : "❌";
+            this.emitEvent({
+                type: "team:chat",
+                fromAgentId: "system",
+                message: `${emoji} [${res.category}] ${res.message}${res.fix ? `\n🛠️ Fix: ${res.fix}` : ""}`,
+                messageType: "status",
+                timestamp: Date.now(),
+            });
+        }
+        this.emitEvent({
+            type: "team:chat",
+            fromAgentId: "system",
+            message: "🏥 Swarm Doctor: Diagnostic complete.",
+            messageType: "status",
+            timestamp: Date.now(),
+        });
+    }
+    // ---------------------------------------------------------------------------
+    // Internal
+    // ---------------------------------------------------------------------------
+    async handleSessionEvent(event, agentId) {
+        // Handle retry logic on task failure (skip if timeout — retrying won't help)
+        if (event.type === "task:failed" && this.retryTracker) {
+            const taskId = event.taskId;
+            const session = this.agentManager.get(agentId);
+            // Workspace Rollback on failure
+            if (session && session.currentSnapshot) {
+                const targetPath = session.worktreePath ?? session.workspaceDir ?? "";
+                if (targetPath) {
+                    console.log(`[Orchestrator] Task failed for ${session.name}. Rolling back workspace...`);
+                    this.snapshotManager.rollback(targetPath, session.currentSnapshot).catch(err => {
+                        console.error(`[Orchestrator] Rollback failed for ${session.name}:`, err);
+                    });
+                }
+                session.currentSnapshot = null;
+            }
+            const wasCancelled = event.error === "Task cancelled by user" || event.rawError === "Task cancelled by user";
+            const wasTimeout = session?.wasTimeout ?? false;
+            const errorForLogic = (event.rawError || event.error || "").toLowerCase();
+            const isQuotaError = errorForLogic.includes("terminalquotaerror") ||
+                errorForLogic.includes("exhausted your daily quota") ||
+                errorForLogic.includes("429") ||
+                errorForLogic.includes("ratelimiterror") ||
+                errorForLogic.includes("usage limit") ||
+                errorForLogic.includes("overloaded") ||
+                errorForLogic.includes("quota exceeded") ||
+                errorForLogic.includes("too many requests") ||
+                errorForLogic.includes("rate limit reached") ||
+                errorForLogic.includes("invalid_api_key") ||
+                errorForLogic.includes("leaked") ||
+                errorForLogic.includes("api_key_invalid") ||
+                errorForLogic.includes("denied") ||
+                errorForLogic.includes("forbidden") ||
+                errorForLogic.includes("401") ||
+                errorForLogic.includes("403") ||
+                errorForLogic.includes("400") ||
+                errorForLogic.includes("unauthorized") ||
+                errorForLogic.includes("compositestrategy.route") ||
+                errorForLogic.includes("modelrouterservice.route") ||
+                errorForLogic.includes("internal error during command execution");
+            const isBrokenBackend = errorForLogic.includes("not found") ||
+                errorForLogic.includes("cannot find module") ||
+                errorForLogic.includes("enoent") ||
+                errorForLogic.includes("failed to fetch") ||
+                errorForLogic.includes("network error");
+            // Handle Key Blacklisting if it's a quota error
+            if (isQuotaError) {
+                this.onBackendFailure?.(agentId, session?.backend.id ?? "unknown", errorForLogic);
+            }
+            if (event.type === "task:done") {
+                const session = this.agentManager.get(agentId);
+                if (session) {
+                    // Autonomous Knowledge Documentation
+                    const result = event.result;
+                    if (result && (result.modules?.length || result.features?.length)) {
+                        this.emitEvent({
+                            type: "agent:status",
+                            agentId,
+                            status: "documenting",
+                        });
+                        knowledgeManager.documentWork({
+                            agentName: session.name,
+                            role: session.role,
+                            taskId: event.taskId,
+                            projectDir: result.projectDir || this.teamId || "default",
+                            summary: result.summary,
+                            modules: result.modules || [],
+                            features: result.features || [],
+                            timestamp: Date.now()
+                        }).catch(err => console.error(`[Orchestrator] Knowledge documentation failed:`, err));
+                    }
+                }
+            }
+            if (!wasCancelled && this.retryTracker.shouldRetry(taskId) && !this.delegationRouter.isDelegated(taskId)) {
+                // If it's a quota error, check if we have more keys for this backend
+                const hasMoreKeys = this.onBackendCheck?.(session?.backend.id ?? "unknown") ?? true;
+                const shouldFailover = (isQuotaError && !hasMoreKeys) || isBrokenBackend;
+                const canFailover = session?.backend.failoverTo && session.backend.failoverTo.length > 0;
+                if (shouldFailover && canFailover) {
+                    // Try to find the first working failover backend
+                    let nextBackend;
+                    let nextBackendId;
+                    for (const fid of session.backend.failoverTo) {
+                        const b = this.backends.get(fid);
+                        if (b) {
+                            // If we have a check function, verify it has keys/is available
+                            if (this.onBackendCheck && !this.onBackendCheck(fid))
+                                continue;
+                            nextBackend = b;
+                            nextBackendId = fid;
+                            break;
+                        }
+                    }
+                    if (nextBackend && nextBackendId) {
+                        const reason = isQuotaError ? "Quota exceeded" : "Backend broken";
+                        console.log(`[Orchestrator] ${reason} for ${session?.backend.id ?? "unknown"}. Failing over to ${nextBackendId}...`);
+                        session.setBackend(nextBackend);
+                        // Emit a status chat so the user knows what's happening instead of just seeing an error
+                        this.emitEvent({
+                            type: "team:chat",
+                            fromAgentId: agentId,
+                            message: `System: Switching to ${nextBackend.name} due to ${isQuotaError ? 'quota limits' : 'service issues'}...`,
+                            messageType: "status",
+                            timestamp: Date.now()
+                        });
+                        // After switching backend, retry the task immediately
+                        const retryPrompt = this.retryTracker.getRetryPrompt(taskId) || event.error;
+                        setTimeout(() => session.runTask(taskId, retryPrompt), 500);
+                        return;
+                    }
+                }
+                // If it was a quota error but we have more keys, just let the normal retry logic handle it
+                // which will pick a new key via getEnv().
+                if (isQuotaError && hasMoreKeys) {
+                    console.log(`[Orchestrator] Quota error for ${session?.backend.id ?? "unknown"}, but more keys are available. Retrying same backend...`);
+                }
+                const state = this.retryTracker.recordAttempt(taskId, event.error);
+                if (state) {
+                    this.emitEvent({
+                        type: "task:retrying",
+                        agentId,
+                        taskId,
+                        attempt: state.attempt,
+                        maxRetries: state.maxRetries,
+                        error: event.error,
+                        rawError: event.rawError,
+                    });
+                    const retryPrompt = this.retryTracker.getRetryPrompt(taskId);
+                    if (retryPrompt) {
+                        const session = this.agentManager.get(agentId);
+                        if (session) {
+                            setTimeout(() => session.runTask(taskId, retryPrompt), CONFIG.timing.retryDelayMs);
+                            return; // Don't emit the task:failed — we're retrying
+                        }
+                    }
+                }
+            }
+            // Retries exhausted — check for escalation (skip on cancel)
+            const escalation = wasCancelled ? null : this.retryTracker.getEscalation(taskId);
+            if (escalation) {
+                const leadId = this.agentManager.getTeamLead();
+                if (leadId && leadId !== agentId) {
+                    const leadSession = this.agentManager.get(leadId);
+                    if (leadSession) {
+                        const escalationTaskId = nanoid();
+                        const teamContext = this.agentManager.getTeamRoster();
+                        leadSession.runTask(escalationTaskId, escalation.prompt, undefined, teamContext);
+                    }
+                }
+            }
+            this.retryTracker.clear(taskId);
+            // ── Auto-Healer: trigger autonomous recovery if enabled ──
+            if (this.autoHealer && !wasCancelled && session) {
+                this.autoHealer.handleFailure(event, session);
+            }
+        }
+        // ── Memory: record reviewer feedback and successful outcomes ──
+        if (event.type === "task:done") {
+            // ── Self-Reflection: trigger autonomous critique if enabled ──
+            const session = this.agentManager.get(agentId);
+            const isReflection = event.taskId.startsWith("reflect_");
+            if (session && !isReflection && !this.reflectingTasks.has(event.taskId) && this.reflectionEngine.shouldReflect(session, event.result)) {
+                this.reflectingTasks.add(event.taskId);
+                console.log(`[Orchestrator] Task ${event.taskId} completed by ${session.name}, triggering reflection...`);
+                const reflectionResult = await this.reflectionEngine.reflect(session, event.result);
+                if (reflectionResult.suggestedTaskId) {
+                    let critique = reflectionResult.critique || "";
+                    // Inject autonomous QA commands if requested
+                    if (reflectionResult.needsQA) {
+                        const qaCommands = [];
+                        if (reflectionResult.needsQA === "lint" || reflectionResult.needsQA === "both")
+                            qaCommands.push("rtk lint");
+                        if (reflectionResult.needsQA === "test" || reflectionResult.needsQA === "both")
+                            qaCommands.push("rtk test");
+                        critique = `## MANDATORY QA ROUND\n` +
+                            `Before proceeding, you MUST run the following verification commands and fix any errors found:\n` +
+                            qaCommands.map(c => `- ${c}`).join("\n") +
+                            `\n\n` + critique;
+                    }
+                    // We run it as a normal task on the same session to keep history
+                    session.incrementFixRound();
+                    setTimeout(() => session.runTask(reflectionResult.suggestedTaskId, critique), 100);
+                    return; // Pause finalization of original task
+                }
+            }
+            // If a reflection task just finished, check if we should suppress the "READY" message from logs/chat
+            if (isReflection && event.result.summary.trim().toUpperCase() === "READY") {
+                console.log(`[Orchestrator] Reflection for ${session?.name} finished: READY.`);
+                // Note: The task:done event still flows to UI so user sees "DONE" but no new noise.
+            }
+            // If we got here, reflection is done or not needed
+            this.reflectingTasks.delete(event.taskId);
+            if (session && this.vectorMemory) {
+                this.vectorMemory.addExperience(agentId, event.taskId, session.getLastPrompt(), event.result.fullOutput || "", true);
+            }
+            const role = session?.role?.toLowerCase() ?? "";
+            if (role.includes("review") && event.result?.fullOutput) {
+                recordReviewFeedback(event.result.fullOutput);
+            }
+        }
+        // Detect phase transitions on task completion
+        if (event.type === "task:done") {
+            // create → design: leader output contains [PLAN]
+            const resultText = (event.result?.summary ?? "") + (event.result?.fullOutput ?? "");
+            if (resultText) {
+                const phaseInfo = this.phaseMachine.checkPlanDetected(agentId, resultText);
+                if (phaseInfo) {
+                    // Capture the plan output as originalTask so design-phase feedback has context
+                    const planOutput = event.result?.fullOutput ?? event.result?.summary ?? "";
+                    if (planOutput) {
+                        this.setOriginalTask(agentId, planOutput);
+                        console.log(`[Orchestrator] Captured plan from create phase (${planOutput.length} chars) for design context`);
+                    }
+                    this.emitEvent({ type: "team:phase", teamId: phaseInfo.teamId, phase: phaseInfo.phase, leadAgentId: phaseInfo.leadAgentId });
+                }
+            }
+        }
+        // Solo agent worktree: auto-commit + merge to main on task completion, but KEEP worktree alive
+        // (--resume needs same CWD, so don't delete the worktree directory).
+        // Team agent worktrees are handled in delegation.ts (different lifecycle).
+        if (event.type === "task:done") {
+            const session = this.agentManager.get(agentId);
+            if (session?.worktreePath && session.worktreeBranch && !session.teamId) {
+                try {
+                    const { execSync } = require("child_process");
+                    const base = require("path").resolve(session.worktreePath, "../..");
+                    // Commit any uncommitted changes
+                    try {
+                        execSync("git add -A && git diff --cached --quiet || git commit -m 'auto-save'", { cwd: session.worktreePath, stdio: "pipe", timeout: 5000 });
+                    }
+                    catch { /* ignore */ }
+                    // Merge branch into main (but keep worktree + branch alive)
+                    try {
+                        execSync(`git merge --no-ff "${session.worktreeBranch}" -m "merge ${session.name}"`, { cwd: base, stdio: "pipe", timeout: 5000 });
+                        console.log(`[Worktree] Auto-merged ${session.worktreeBranch} to main (worktree kept alive)`);
+                    }
+                    catch {
+                        console.log(`[Worktree] Auto-merge failed for ${session.worktreeBranch} (conflict or no changes)`);
+                    }
+                }
+                catch (err) {
+                    console.error(`[Worktree] Auto-save/merge failed:`, err);
+                }
+            }
+            this.retryTracker?.clear(event.taskId);
+            // Accumulate changedFiles from all workers (not leader, not QA/reviewer)
+            if (!this.agentManager.isTeamLead(agentId) && event.result?.changedFiles) {
+                for (const f of event.result.changedFiles) {
+                    this.teamChangedFiles.add(f);
+                }
+            }
+            // Capture preview fields from dev workers (not reviewer, not leader).
+            // These are the ground truth — the worker created the actual files.
+            // Always update — later fix iterations may produce a newer/fixed build.
+            if (!this.agentManager.isTeamLead(agentId)) {
+                const role = session?.role?.toLowerCase() ?? "";
+                const isDevWorker = !role.includes("review");
+                if (isDevWorker && event.result && (event.result.previewUrl || event.result.entryFile || event.result.previewCmd)) {
+                    this.teamPreview = {
+                        previewUrl: event.result.previewUrl,
+                        previewPath: event.result.previewPath,
+                        entryFile: event.result.entryFile,
+                        previewCmd: event.result.previewCmd,
+                        previewPort: event.result.previewPort,
+                    };
+                    console.log(`[Orchestrator] Preview captured from ${session?.name}: url=${this.teamPreview.previewUrl}, entry=${this.teamPreview.entryFile}, cmd=${this.teamPreview.previewCmd}`);
+                }
+            }
+            // For team leaders: determine if this is the final result.
+            if (this.agentManager.isTeamLead(agentId)) {
+                const isResultTask = this.delegationRouter.isResultTask(event.taskId);
+                // Did the leader process results WITHOUT creating new delegations?
+                // This uses a delegation counter snapshot, not hasPendingFrom (which is
+                // polluted by old/straggler workers still running from previous rounds).
+                const leaderDidNotDelegateNewWork = isResultTask
+                    && this.delegationRouter.resultTaskDidNotDelegate(event.taskId);
+                // Safety net: budget exhausted and no new delegations pending
+                const budgetForced = this.delegationRouter.isBudgetExhausted()
+                    && !this.delegationRouter.hasPendingFrom(agentId);
+                // Don't finalize if any worker is still actively working (safety timeout may have
+                // flushed partial results while QA/reviewer is still running)
+                const hasWorkingWorkers = this.agentManager.getAll().some(w => w.agentId !== agentId && w.status === "working");
+                if (hasWorkingWorkers && !budgetForced) {
+                    console.log(`[Orchestrator] Deferring finalization — workers still running`);
+                }
+                const shouldFinalize = (leaderDidNotDelegateNewWork || budgetForced) && !this.teamFinalized && (!hasWorkingWorkers || budgetForced);
+                if (shouldFinalize) {
+                    this.teamFinalized = true;
+                    event.isFinalResult = true;
+                    // execute → complete transition
+                    const completeInfo = this.phaseMachine.checkFinalResult(agentId);
+                    if (completeInfo) {
+                        this.emitEvent({ type: "team:phase", teamId: completeInfo.teamId, phase: completeInfo.phase, leadAgentId: completeInfo.leadAgentId });
+                    }
+                    // Clear any straggler delegations so they don't restart the leader later
+                    this.delegationRouter.clearAgent(agentId);
+                    // Finalize: merge team data, validate entry file, resolve preview URL
+                    if (event.result) {
+                        finalizeTeamResult({
+                            result: event.result,
+                            teamPreview: this.teamPreview,
+                            teamChangedFiles: this.teamChangedFiles,
+                            projectDir: this.delegationRouter.getTeamProjectDir(),
+                            workspace: this.workspace,
+                            detectWorkerPreview: () => {
+                                for (const worker of this.agentManager.getAll()) {
+                                    if (worker.agentId === agentId)
+                                        continue;
+                                    const { previewUrl, previewPath } = worker.detectPreview();
+                                    if (previewUrl)
+                                        return { previewUrl, previewPath };
+                                }
+                                return null;
+                            },
+                        });
+                    }
+                    const summary = event.result?.summary?.slice(0, CONFIG.limits.chatMessageChars) ?? "All tasks completed.";
+                    // ── Memory: record project completion ──
+                    const leaderSession = this.agentManager.get(agentId);
+                    const planText = leaderSession?.originalTask ?? "";
+                    const techMatch = planText.match(/TECH:\s*(.+)/i);
+                    const tech = techMatch?.[1]?.trim() ?? "unknown";
+                    recordProjectCompletion(summary, tech, true);
+                    if (tech !== "unknown") {
+                        recordTechPreference(tech);
+                    }
+                    this.emitEvent({
+                        type: "team:chat",
+                        fromAgentId: agentId,
+                        message: `Project complete: ${summary}`,
+                        messageType: "status",
+                        timestamp: Date.now(),
+                    });
+                }
+                else if (!isResultTask && !this.delegationRouter.hasPendingFrom(agentId)) {
+                    // Leader answered without delegating (e.g. user asked a question in execute phase).
+                    // Treat as conversational — mark as final so the frontend shows it.
+                    console.log(`[Orchestrator] Leader ${agentId} completed without delegations — treating as conversational reply`);
+                    event.isFinalResult = true;
+                    const completeInfo = this.phaseMachine.checkFinalResult(agentId);
+                    if (completeInfo) {
+                        this.emitEvent({ type: "team:phase", teamId: completeInfo.teamId, phase: completeInfo.phase, leadAgentId: completeInfo.leadAgentId });
+                    }
+                }
+            }
+        }
+        // Handle worktree cleanup on task failure (after retry logic)
+        if (event.type === "task:failed") {
+            const session = this.agentManager.get(agentId);
+            if (session?.worktreePath && session.worktreeBranch) {
+                removeWorktree(session.worktreePath, session.worktreeBranch, this.workspace);
+                session.worktreePath = null;
+                session.worktreeBranch = null;
+            }
+        }
+        this.emitEvent(event);
+    }
+    emitEvent(event) {
+        if (event.type === "team:chat") {
+            const agent = this.agentManager.get(event.fromAgentId);
+            this.agentManager.pushChat(agent?.name ?? event.fromAgentId, event.message, event.messageType);
+        }
+        else if (event.type === "task:delegated") {
+            const from = this.agentManager.get(event.fromAgentId);
+            const to = this.agentManager.get(event.toAgentId);
+            this.agentManager.pushChat(from?.name ?? event.fromAgentId, `Delegated task to ${to?.name ?? event.toAgentId}: ${event.prompt.slice(0, 50)}...`, "delegation");
+        }
+        else if (event.type === "task:result-returned") {
+            const from = this.agentManager.get(event.fromAgentId);
+            const to = this.agentManager.get(event.toAgentId);
+            this.agentManager.pushChat(from?.name ?? event.fromAgentId, `Returned result to ${to?.name ?? event.toAgentId}: ${event.summary.slice(0, 50)}...`, "result");
+        }
+        else if (event.type === "meta:thought") {
+            this.agentManager.pushChat("Architect", event.thought, "thought");
+        }
+        // Forward to Global Swarm Bus
+        bus.emitEvent(event);
+        this.emit(event.type, event);
+    }
+    // ---------------------------------------------------------------------------
+    // Loops
+    // ---------------------------------------------------------------------------
+    /**
+     * Emergency rescue: Resets all agents, clears stuck sessions,
+     * and potentially switches their backend to a stable default (Gemini).
+     */
+    rescueSwarm() {
+        this.agentManager.rescueAll(this.defaultBackendId);
+        this.emitEvent({
+            type: "agent:status",
+            agentId: "system",
+            status: "idle",
+        });
+    }
+    startLoops() {
+        // Cognitive Consolidation Loop (every 5 mins)
+        setInterval(() => this.consolidateKnowledge(), 5 * 60 * 1000);
+        // Omni-Memory Pruning Loop (every 24 hrs)
+        setInterval(() => {
+            if (this.vectorMemory) {
+                this.vectorMemory.pruneOldEntries().catch(() => { });
+            }
+        }, 24 * 60 * 60 * 1000);
+        // Swarm Briefing Loop (every 10 seconds)
+        this.startBriefingLoop();
+        // Autonomous Self-Improvement Loop (every 12 hours)
+        setInterval(() => {
+            console.log("[Orchestrator] Triggering autonomous self-improvement cycle...");
+            this.metaArchitect.triggerSelfImprovement().catch(() => { });
+        }, 12 * 60 * 60 * 1000);
+    }
+    startBriefingLoop() {
+        if (this.briefingTimer)
+            return;
+        this.briefingTimer = setInterval(() => {
+            this.broadcastBriefings();
+        }, 10 * 1000);
+    }
+    broadcastBriefings() {
+        const activeAgents = this.agentManager.getAll().filter((a) => a.status === "working");
+        if (activeAgents.length === 0)
+            return;
+        for (const agent of activeAgents) {
+            const lastLog = agent.lastLogLine;
+            if (!lastLog)
+                continue;
+            // Broadcast a mission briefing update
+            this.emitEvent({
+                type: "team:chat",
+                fromAgentId: agent.agentId,
+                message: `[Mission Briefing] ${lastLog}`,
+                messageType: "briefing",
+                timestamp: Date.now(),
+            });
+        }
+    }
+    async consolidateKnowledge() {
+        if (!this.vectorMemory)
+            return;
+        try {
+            console.log(`[Orchestrator] Running cognitive consolidation...`);
+            const insights = await this.vectorMemory.consolidate();
+            if (insights.length > 0) {
+                console.log(`[Orchestrator] Consolidated ${insights.length} new knowledge insights.`);
+                this.emitEvent({
+                    type: "knowledge:consolidated",
+                    insights: insights.map((i) => ({
+                        id: i.id,
+                        title: i.title,
+                        content: i.content,
+                        tags: i.tags,
+                    })),
+                });
+            }
+        }
+        catch (err) {
+            console.error(`[Orchestrator] Cognitive consolidation failed:`, err);
+        }
+    }
+}
+//# sourceMappingURL=orchestrator.js.map

@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "sqlite": {
+      "command": "mcp-server-sqlite",
+      "args": ["--db", "/root/.bit-office/office.db"]
+    },
+    "repomix": {
+      "command": "repomix-mcp",
+      "args": []
+    },
+    "memory": {
+      "command": "mcp-server-everything",
+      "args": []
+    }
+  }
+}

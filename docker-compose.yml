@@ -1,0 +1,79 @@
+services:
+  gateway:
+    image: bit-office:god-mode-v5
+    container_name: bit-office-gateway
+    ports:
+      - "9105:9100"
+    volumes:
+      # Persistent agent config and memory
+      - ~/.bit-office:/root/.bit-office
+      - ~/.claude:/root/.claude
+      - ~/.config:/root/.config
+      # Mount the repo itself so agents can work on it
+      - .:/app/repo
+      # Master workspace - maps D:\www (the parent) to /app/workspace
+      - ..:/app/workspace
+      # Mount env directly for fast updates
+      - ./apps/gateway/.env:/app/apps/gateway/.env
+    env_file:
+      - apps/gateway/.env
+    depends_on:
+      - qdrant
+      - ollama
+      - web
+    environment:
+      - NODE_ENV=production
+      - WS_PORT=9100
+      - WEB_HOST=web
+      - WEB_PORT=3000
+      - QDRANT_HOST=qdrant
+      - OLLAMA_HOST=host.docker.internal
+      - WORKSPACE=/app/workspace
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    networks:
+      - bit-office-net
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: bit-office-web
+    ports:
+      - "3005:3000"
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+    networks:
+      - bit-office-net
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: bit-office-qdrant
+    ports:
+      - "6335:6333" # Using 6335 to avoid conflict with existing www-qdrant
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+    networks:
+      - bit-office-net
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: bit-office-ollama
+    ports:
+      - "11435:11434" # Using 11435 to avoid conflict with existing www-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - bit-office-net
+
+networks:
+  bit-office-net:
+    driver: bridge
+
+volumes:
+  qdrant_storage:
+  ollama_data:

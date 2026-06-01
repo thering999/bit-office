@@ -15,15 +15,26 @@ export interface BuildArgsOpts {
   verbose?: boolean;
   /** Skip session resume for this invocation (leader state-summary mode) */
   skipResume?: boolean;
+  /** Optional path to a screenshot for vision-capable backends */
+  imagePath?: string;
 }
 
 export interface AIBackend {
   id: string;
+  /** Human-readable name */
   name: string;
+  /** Base command to spawn (e.g. "claude", "gemini", "node") */
   command: string;
+  /** UI theme color (hex) */
+  color?: string;
+  /** Build command line arguments for a prompt */
   buildArgs(prompt: string, opts: BuildArgsOpts): string[];
   /** Extra env vars to delete before spawning (e.g. CLAUDECODE) */
   deleteEnv?: string[];
   /** Whether this backend accepts stdin messages while running */
   supportsStdin?: boolean;
+  /** Dynamic environment variables to merge before spawning (e.g. key rotation) */
+  getEnv?: (agentId?: string) => Record<string, string>;
+  /** Optional backup backend IDs to try if this one fails (failover chain) */
+  failoverTo?: string[];
 }

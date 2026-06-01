@@ -6,21 +6,18 @@ import dynamic from "next/dynamic";
 
 const OfficeSplash = dynamic(() => import("@/components/OfficeSplash"), { ssr: false });
 
+import { getConnection } from "@/lib/storage";
+
 export default function Home() {
   const router = useRouter();
   const [showSplash, setShowSplash] = useState(true);
 
   // Check if already connected — skip splash
   useEffect(() => {
-    try {
-      const { getConnection } = require("@/lib/storage");
-      const conn = getConnection();
-      if (conn) {
-        setShowSplash(false);
-        router.replace("/office");
-      }
-    } catch {
-      // storage not available
+    const conn = getConnection();
+    if (conn) {
+      setShowSplash(false);
+      router.replace("/office");
     }
   }, [router]);
 

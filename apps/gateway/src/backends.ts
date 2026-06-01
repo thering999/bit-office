@@ -2,7 +2,8 @@ import { execSync } from "child_process";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import path from "path";
-import type { AIBackend } from "@bit-office/orchestrator";
+import { fileURLToPath } from "url";
+import { AIBackend, ProviderBackend, GeminiCLIBackend } from "@bit-office/orchestrator";
 
 const isRoot = process.getuid?.() === 0;
 
@@ -40,7 +41,24 @@ function ensureClaudeSettingsForRoot() {
 
 ensureClaudeSettingsForRoot();
 
+const currentDir = path.dirname(fileURLToPath(import.meta.url));
+const genericApiPath = existsSync(path.join(currentDir, "generic-api.js"))
+  ? path.join(currentDir, "generic-api.js")
+  : path.join(currentDir, "dist", "generic-api.js");
+
 const backends: AIBackend[] = [
+  {
+    id: "smart-router",
+    name: "Ultimate Intelligence (Smart Router)",
+    command: "node",
+    buildArgs(prompt) {
+      return [genericApiPath, "smart", prompt];
+    },
+    color: "#FFD700", // Gold
+    failoverTo: ["gemini-cli", "groq", "claude"],
+  },
+  new ProviderBackend(),
+  new GeminiCLIBackend(),
   {
     id: "claude",
     name: "Claude Code",
@@ -61,6 +79,7 @@ const backends: AIBackend[] = [
       return args;
     },
     deleteEnv: ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"],
+    failoverTo: ["typhoon", "mistral", "groq", "gemini-api", "deepseek"],
   },
   {
     id: "codex",
@@ -72,14 +91,16 @@ const backends: AIBackend[] = [
       }
       return ["exec", prompt, "--full-auto", "--skip-git-repo-check"];
     },
+    failoverTo: ["typhoon", "mistral", "groq", "gemini-api", "deepseek"],
   },
   {
     id: "gemini",
-    name: "Gemini CLI",
+    name: "Gemini CLI (Legacy)",
     command: "gemini",
     buildArgs(prompt) {
       return ["-p", prompt, "--yolo"];
     },
+    failoverTo: ["typhoon", "mistral", "groq", "gemini-api", "deepseek"],
   },
   {
     id: "aider",
@@ -88,6 +109,7 @@ const backends: AIBackend[] = [
     buildArgs(prompt) {
       return ["--message", prompt, "--yes", "--no-pretty", "--no-git"];
     },
+    failoverTo: ["typhoon", "mistral", "groq", "gemini-api", "deepseek"],
   },
   {
     id: "opencode",
@@ -96,6 +118,97 @@ const backends: AIBackend[] = [
     buildArgs(prompt) {
       return ["run", prompt, "--quiet"];
     },
+    failoverTo: ["typhoon", "mistral", "groq", "gemini-api", "deepseek"],
+  },
+  {
+    id: "typhoon",
+    name: "Typhoon API",
+    command: "node",
+    buildArgs(prompt) {
+      return [genericApiPath, "typhoon", prompt];
+    },
+    failoverTo: ["mistral", "groq", "gemini-api", "deepseek"],
+  },
+  {
+    id: "openrouter",
+    name: "OpenRouter API",
+    command: "node",
+    buildArgs(prompt) {
+      return [genericApiPath, "openrouter", prompt];
+    },
+    failoverTo: ["typhoon", "mistral", "groq", "gemini-api", "deepseek"],
+  },
+  {
+    id: "deepseek-api",
+    name: "DeepSeek API (Direct)",
+    command: "node",
+    buildArgs(prompt) {
+      return [genericApiPath, "deepseek", prompt];
+    },
+    failoverTo: ["typhoon", "mistral", "groq", "gemini-api"],
+  },
+  {
+    id: "openai-api",
+    name: "OpenAI API (Direct)",
+    command: "node",
+    buildArgs(prompt) {
+      return [genericApiPath, "openai", prompt];
+    },
+    failoverTo: ["typhoon", "mistral", "groq", "gemini-api", "deepseek"],
+  },
+  {
+    id: "claude-api",
+    name: "Claude API (Direct)",
+    command: "node",
+    buildArgs(prompt) {
+      return [genericApiPath, "claude", prompt];
+    },
+    failoverTo: ["typhoon", "mistral", "groq", "gemini-api", "deepseek"],
+  },
+  {
+    id: "gemini-api",
+    name: "Gemini API (Direct)",
+    command: "node",
+    buildArgs(prompt) {
+      return [genericApiPath, "gemini", prompt];
+    },
+    failoverTo: ["typhoon", "mistral", "groq", "deepseek"],
+  },
+  {
+    id: "groq",
+    name: "Groq API",
+    command: "node",
+    buildArgs(prompt) {
+      return [genericApiPath, "groq", prompt];
+    },
+    failoverTo: ["typhoon", "mistral", "gemini-api", "deepseek"],
+  },
+  {
+    id: "groq-reasoner",
+    name: "Groq DeepSeek R1",
+    command: "node",
+    buildArgs(prompt) {
+      return [genericApiPath, "groq-reasoner", prompt];
+    },
+    failoverTo: ["typhoon", "mistral", "groq", "gemini-api", "deepseek"],
+  },
+  {
+    id: "deepseek",
+    name: "DeepSeek R1 (Reasoner)",
+    command: "node",
+    buildArgs(prompt) {
+      return [genericApiPath, "deepseek", prompt];
+    },
+    failoverTo: ["typhoon", "mistral", "groq", "gemini-api"],
+  },
+  {
+    id: "mistral",
+    name: "Mistral API",
+    command: "node",
+    buildArgs(prompt) {
+      return [genericApiPath, "mistral", prompt];
+    },
+    failoverTo: ["typhoon", "groq", "gemini-api", "deepseek"],
   },
 ];
 
@@ -114,7 +227,8 @@ export function detectBackends(): string[] {
   const detected: string[] = [];
   for (const backend of backends) {
     try {
-      execSync(`which ${backend.command}`, { stdio: "ignore", timeout: 3000 });
+      const checkCmd = process.platform === "win32" ? `where ${backend.command}` : `which ${backend.command}`;
+      execSync(checkCmd, { stdio: "ignore", timeout: 3000 });
       detected.push(backend.id);
     } catch {
       // not installed

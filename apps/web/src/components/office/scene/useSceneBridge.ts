@@ -34,6 +34,32 @@ function deriveBubble(agent: { pendingApproval: unknown; status: string }): Bubb
 }
 
 /**
+ * Alive Pixel Office: derive a granular activity status from the agent's last log line.
+ * Maps log keywords → specialized character animation states.
+ */
+function deriveActivityStatus(agent: { status: string; lastLogLine?: string | null }): string {
+  if (agent.status !== "working") return agent.status;
+  const log = (agent.lastLogLine ?? "").toLowerCase();
+  
+  if (log.includes("docker") || log.includes("database") || log.includes("redis") || log.includes("server") || log.includes("infra")) {
+    return "walking_to_server";
+  }
+  if (log.includes("search") || log.includes("read") || log.includes("fetch") || log.includes("retriev") || log.includes("find")) {
+    return "searching";
+  }
+  if (log.includes("test") || log.includes("lint") || log.includes("verify") || log.includes("check") || log.includes("validat")) {
+    return "testing";
+  }
+  if (log.includes("writ") || log.includes("creat") || log.includes("implement") || log.includes("build") || log.includes("edit") || log.includes("sav")) {
+    return "coding";
+  }
+  if (log.includes("think") || log.includes("analyz") || log.includes("plan") || log.includes("design") || log.includes("consider")) {
+    return "thinking";
+  }
+  return "working";
+}
+
+/**
  * Bridges the Zustand office store to any SceneAdapter implementation.
  * Handles agent lifecycle, status/bubble sync, speech bubbles, and selection.
  */
@@ -60,7 +86,7 @@ export function useSceneBridge(
         isExternal: !!agent.isExternal,
         palette: agent.palette,
       });
-      adapter.updateAgent(agentId, agent.status, deriveBubble(agent), !!agent.teamId);
+      adapter.updateAgent(agentId, deriveActivityStatus(agent) as any, deriveBubble(agent), !!agent.teamId);
       knownAgentsRef.current.add(agentId);
       prevMsgCountRef.current.set(agentId, agent.messages.length);
       prevLogLineRef.current.set(agentId, agent.lastLogLine ?? null);
@@ -96,7 +122,7 @@ export function useSceneBridge(
         }
 
         // Team members keep their seat when inactive (done/idle), solo agents release it
-        adapter.updateAgent(agentId, agent.status, deriveBubble(agent), !!agent.teamId);
+        adapter.updateAgent(agentId, deriveActivityStatus(agent) as any, deriveBubble(agent), !!agent.teamId);
 
         // Detect new agent messages -> speech bubble
         const prevCount = prevMsgCountRef.current.get(agentId) ?? 0;

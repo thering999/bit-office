@@ -18,6 +18,7 @@ export function saveConnection(info: ConnectionInfo) {
 }
 
 export function getConnection(): ConnectionInfo | null {
+  if (typeof window === "undefined") return null;
   // Prefer sessionStorage (tab-specific), fall back to localStorage (owner persisted)
   const raw = sessionStorage.getItem(CONNECTION_KEY) ?? localStorage.getItem(CONNECTION_KEY);
   if (!raw) return null;

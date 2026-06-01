@@ -1,234 +1,60 @@
-// ---------------------------------------------------------------------------
-// Agent status (local definition — no dependency on @office/shared)
-// ---------------------------------------------------------------------------
+import {
+  OrchTaskResultPayload as TaskResultPayload,
+  OrchTaskStartedEvent as TaskStartedEvent,
+  OrchTaskDoneEvent as TaskDoneEvent,
+  OrchTaskFailedEvent as TaskFailedEvent,
+  OrchTaskDelegatedEvent as TaskDelegatedEvent,
+  OrchTaskRetryingEvent as TaskRetryingEvent,
+  OrchAgentStatusEvent as AgentStatusEvent,
+  OrchApprovalNeededEvent as ApprovalNeededEvent,
+  OrchLogAppendEvent as LogAppendEvent,
+  OrchReflectionEvent as ReflectionEvent,
+  OrchTeamChatEvent as TeamChatEvent,
+  OrchTaskQueuedEvent as TaskQueuedEvent,
+  OrchWorktreeCreatedEvent as WorktreeCreatedEvent,
+  OrchWorktreeMergedEvent as WorktreeMergedEvent,
+  OrchAgentActivityEvent as AgentActivityEvent,
+  OrchAgentCreatedEvent as AgentCreatedEvent,
+  OrchAgentFiredEvent as AgentFiredEvent,
+  OrchTaskResultReturnedEvent as TaskResultReturnedEvent,
+  OrchMetaThoughtEvent as MetaThoughtEvent,
+  OrchTeamPhaseChangedEvent as TeamPhaseChangedEvent,
+  OrchTokenUpdateEvent as TokenUpdateEvent,
+  OrchSwarmHealthEvent as SwarmHealthEvent,
+  OrchSwarmReassemblyEvent as SwarmReassemblyEvent,
+  OrchToolStartedEvent as ToolStartedEvent,
+  OrchToolFinishedEvent as ToolFinishedEvent,
+} from "@office/shared";
 
-export type AgentStatus = "idle" | "working" | "waiting_approval" | "done" | "error";
-export type RiskLevel = "low" | "med" | "high";
-export type Decision = "yes" | "no";
+export type {
+  TaskResultPayload,
+  TaskStartedEvent,
+  TaskDoneEvent,
+  TaskFailedEvent,
+  TaskDelegatedEvent,
+  TaskRetryingEvent,
+  AgentStatusEvent,
+  ApprovalNeededEvent,
+  LogAppendEvent,
+  ReflectionEvent,
+  TeamChatEvent,
+  TaskQueuedEvent,
+  WorktreeCreatedEvent,
+  WorktreeMergedEvent,
+  AgentActivityEvent,
+  AgentCreatedEvent,
+  AgentFiredEvent,
+  TaskResultReturnedEvent,
+  MetaThoughtEvent,
+  TeamPhaseChangedEvent,
+  TokenUpdateEvent,
+  SwarmHealthEvent,
+  SwarmReassemblyEvent,
+  ToolStartedEvent,
+  ToolFinishedEvent,
+};
 
-// ---------------------------------------------------------------------------
-// Task result
-// ---------------------------------------------------------------------------
-
-export interface TaskResultPayload {
-  summary: string;
-  fullOutput?: string;
-  changedFiles: string[];
-  diffStat: string;
-  testResult: "passed" | "failed" | "unknown";
-  previewUrl?: string;
-  previewPath?: string;
-  entryFile?: string;
-  projectDir?: string;
-  previewCmd?: string;
-  previewPort?: number;
-  tokenUsage?: { inputTokens: number; outputTokens: number };
-}
-
-// ---------------------------------------------------------------------------
-// Orchestrator events
-// ---------------------------------------------------------------------------
-
-export interface TaskStartedEvent {
-  type: "task:started";
-  agentId: string;
-  taskId: string;
-  prompt: string;
-}
-
-export interface TaskDoneEvent {
-  type: "task:done";
-  agentId: string;
-  taskId: string;
-  result: TaskResultPayload;
-  /** True when a team leader completes with no pending delegated tasks — the real final result. */
-  isFinalResult?: boolean;
-}
-
-export interface TaskFailedEvent {
-  type: "task:failed";
-  agentId: string;
-  taskId: string;
-  error: string;
-}
-
-export interface TaskDelegatedEvent {
-  type: "task:delegated";
-  fromAgentId: string;
-  toAgentId: string;
-  taskId: string;
-  prompt: string;
-}
-
-export interface TaskRetryingEvent {
-  type: "task:retrying";
-  agentId: string;
-  taskId: string;
-  attempt: number;
-  maxRetries: number;
-  error: string;
-}
-
-export interface AgentStatusEvent {
-  type: "agent:status";
-  agentId: string;
-  status: AgentStatus;
-}
-
-export interface ApprovalNeededEvent {
-  type: "approval:needed";
-  approvalId: string;
-  agentId: string;
-  taskId: string;
-  title: string;
-  summary: string;
-  riskLevel: RiskLevel;
-}
-
-export interface LogAppendEvent {
-  type: "log:append";
-  agentId: string;
-  taskId: string;
-  stream: "stdout" | "stderr";
-  chunk: string;
-}
-
-export interface TeamChatEvent {
-  type: "team:chat";
-  fromAgentId: string;
-  toAgentId?: string;
-  message: string;
-  messageType: "delegation" | "result" | "status";
-  taskId?: string;
-  timestamp: number;
-}
-
-export interface TaskQueuedEvent {
-  type: "task:queued";
-  agentId: string;
-  taskId: string;
-  prompt: string;
-  position: number;
-}
-
-export interface WorktreeCreatedEvent {
-  type: "worktree:created";
-  agentId: string;
-  taskId: string;
-  worktreePath: string;
-  branch: string;
-}
-
-export interface WorktreeMergedEvent {
-  type: "worktree:merged";
-  agentId: string;
-  taskId: string;
-  branch: string;
-  success: boolean;
-  conflictFiles?: string[];
-}
-
-export interface AgentActivityEvent {
-  type: "agent:activity";
-  agentId: string;
-  agentName: string;
-  intent: string;
-  phase: "started" | "completed";
-  touchedFiles?: string[];
-  exports?: string[];
-  needs?: string[];
-}
-
-export interface AgentCreatedEvent {
-  type: "agent:created";
-  agentId: string;
-  name: string;
-  role: string;
-  palette?: number;
-  personality?: string;
-  backend?: string;
-  isTeamLead?: boolean;
-  teamId?: string;
-}
-
-export interface AgentFiredEvent {
-  type: "agent:fired";
-  agentId: string;
-}
-
-export interface TaskResultReturnedEvent {
-  type: "task:result-returned";
-  fromAgentId: string;
-  toAgentId: string;
-  taskId: string;
-  summary: string;
-  success: boolean;
-}
-
-// ---------------------------------------------------------------------------
-// Team phase
-// ---------------------------------------------------------------------------
-
-export type TeamPhase = "create" | "design" | "execute" | "complete";
-
-export interface TeamPhaseChangedEvent {
-  type: "team:phase";
-  teamId: string;
-  phase: TeamPhase;
-  leadAgentId: string;
-}
-
-export interface TokenUpdateEvent {
-  type: "token:update";
-  agentId: string;
-  inputTokens: number;
-  outputTokens: number;
-}
-
-export type OrchestratorEvent =
-  | TaskStartedEvent
-  | TaskDoneEvent
-  | TaskFailedEvent
-  | TaskDelegatedEvent
-  | TaskRetryingEvent
-  | AgentStatusEvent
-  | ApprovalNeededEvent
-  | LogAppendEvent
-  | TeamChatEvent
-  | TaskQueuedEvent
-  | WorktreeCreatedEvent
-  | WorktreeMergedEvent
-  | AgentActivityEvent
-  | AgentCreatedEvent
-  | AgentFiredEvent
-  | TaskResultReturnedEvent
-  | TeamPhaseChangedEvent
-  | TokenUpdateEvent;
-
-// ---------------------------------------------------------------------------
-// Event map for typed EventEmitter
-// ---------------------------------------------------------------------------
-
-export interface OrchestratorEventMap {
-  "task:started": [TaskStartedEvent];
-  "task:done": [TaskDoneEvent];
-  "task:failed": [TaskFailedEvent];
-  "task:delegated": [TaskDelegatedEvent];
-  "task:retrying": [TaskRetryingEvent];
-  "agent:status": [AgentStatusEvent];
-  "approval:needed": [ApprovalNeededEvent];
-  "log:append": [LogAppendEvent];
-  "team:chat": [TeamChatEvent];
-  "task:queued": [TaskQueuedEvent];
-  "worktree:created": [WorktreeCreatedEvent];
-  "worktree:merged": [WorktreeMergedEvent];
-  "agent:activity": [AgentActivityEvent];
-  "agent:created": [AgentCreatedEvent];
-  "agent:fired": [AgentFiredEvent];
-  "task:result-returned": [TaskResultReturnedEvent];
-  "team:phase": [TeamPhaseChangedEvent];
-  "token:update": [TokenUpdateEvent];
-}
+export * from "@office/shared";
 
 // ---------------------------------------------------------------------------
 // Options
@@ -252,7 +78,9 @@ export interface OrchestratorOptions {
   /** Registered AI backends */
   backends: import("./ai-backend.js").AIBackend[];
   /** Default backend ID (defaults to first backend) */
-  defaultBackend?: string;
+  defaultBackendId?: string;
+  /** Whether to use visual perception */
+  useVision?: boolean;
   /** Worktree isolation options. false to disable entirely. */
   worktree?: WorktreeOptions | false;
   /** Auto-retry options. false to disable entirely. */
@@ -261,6 +89,10 @@ export interface OrchestratorOptions {
   promptsDir?: string;
   /** Sandbox mode: "full" gives agent full access, "safe" restricts */
   sandboxMode?: "full" | "safe";
+  /** Optional callback for backend-specific failures (e.g. key rotation) */
+  onBackendFailure?: (agentId: string, backendId: string, error: string) => void;
+  /** Optional callback to check if a backend has available capacity/keys */
+  onBackendCheck?: (backendId: string) => boolean;
 }
 
 export interface CreateAgentOpts {
@@ -281,6 +113,8 @@ export interface CreateTeamOpts {
 }
 
 export interface RunTaskOpts {
+  taskId?: string;
+  prompt: string;
   repoPath?: string;
   phaseOverride?: string;
 }

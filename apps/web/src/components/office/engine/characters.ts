@@ -55,6 +55,7 @@ export function createCharacter(
   return {
     id,
     state,
+    targetState: state,
     dir: seat ? seat.facingDir : Direction.DOWN,
     x: center.x,
     y: center.y,
@@ -118,6 +119,66 @@ export function updateCharacter(
         ch.wanderTimer = randomRange(WANDER_PAUSE_MIN_SEC, WANDER_PAUSE_MAX_SEC)
         ch.wanderCount = 0
         ch.wanderLimit = randomInt(WANDER_MOVES_BEFORE_REST_MIN, WANDER_MOVES_BEFORE_REST_MAX)
+      } else if (ch.targetState && ch.targetState !== CharacterState.TYPE) {
+        // Status changed while at desk (e.g. from coding to thinking)
+        ch.state = ch.targetState
+        ch.frame = 0
+        ch.frameTimer = 0
+      }
+      break
+    }
+
+    case CharacterState.THINK: {
+      // Slower animation for thinking (subtle head tilt / blink feel)
+      if (ch.frameTimer >= TYPE_FRAME_DURATION_SEC * 3) {
+        ch.frameTimer -= TYPE_FRAME_DURATION_SEC * 3
+        ch.frame = (ch.frame + 1) % 2
+      }
+      if (!ch.isActive) {
+        ch.state = CharacterState.IDLE
+        ch.frame = 0
+        ch.frameTimer = 0
+      } else if (ch.targetState && ch.targetState !== CharacterState.THINK) {
+        // Status changed while at desk (e.g. from thinking to coding)
+        ch.state = ch.targetState
+        ch.frame = 0
+        ch.frameTimer = 0
+      }
+      break
+    }
+
+    case CharacterState.SEARCHING: {
+      // Medium speed animation for searching
+      if (ch.frameTimer >= TYPE_FRAME_DURATION_SEC * 2) {
+        ch.frameTimer -= TYPE_FRAME_DURATION_SEC * 2
+        ch.frame = (ch.frame + 1) % 2
+      }
+      if (!ch.isActive) {
+        ch.state = CharacterState.IDLE
+        ch.frame = 0
+        ch.frameTimer = 0
+      } else if (ch.targetState && ch.targetState !== CharacterState.SEARCHING) {
+        ch.state = ch.targetState
+        ch.frame = 0
+        ch.frameTimer = 0
+      }
+      break
+    }
+
+    case CharacterState.TESTING: {
+      // Fast animation for testing (similar to typing)
+      if (ch.frameTimer >= TYPE_FRAME_DURATION_SEC) {
+        ch.frameTimer -= TYPE_FRAME_DURATION_SEC
+        ch.frame = (ch.frame + 1) % 2
+      }
+      if (!ch.isActive) {
+        ch.state = CharacterState.IDLE
+        ch.frame = 0
+        ch.frameTimer = 0
+      } else if (ch.targetState && ch.targetState !== CharacterState.TESTING) {
+        ch.state = ch.targetState
+        ch.frame = 0
+        ch.frameTimer = 0
       }
       break
     }
@@ -148,7 +209,7 @@ export function updateCharacter(
             ch.frame = 0
             ch.frameTimer = 0
           } else {
-            ch.state = CharacterState.TYPE
+            ch.state = ch.targetState ?? CharacterState.TYPE
             ch.dir = seat.facingDir
             ch.frame = 0
             ch.frameTimer = 0
@@ -255,7 +316,7 @@ export function updateCharacter(
           } else {
             const seat = seats.get(ch.seatId)
             if (seat && ch.tileCol === seat.seatCol && ch.tileRow === seat.seatRow) {
-              ch.state = CharacterState.TYPE
+              ch.state = ch.targetState ?? CharacterState.TYPE
               ch.dir = seat.facingDir
             } else {
               ch.state = CharacterState.IDLE
@@ -279,7 +340,7 @@ export function updateCharacter(
           if (ch.seatId) {
             const seat = seats.get(ch.seatId)
             if (seat && ch.tileCol === seat.seatCol && ch.tileRow === seat.seatRow) {
-              ch.state = CharacterState.TYPE
+              ch.state = ch.targetState ?? CharacterState.TYPE
               ch.dir = seat.facingDir
               if (ch.seatTimer < 0) {
                 ch.seatTimer = 0
@@ -347,6 +408,15 @@ export function getCharacterSprite(ch: Character, sprites: CharacterSprites): Sp
         return sprites.reading[ch.dir][ch.frame % 2]
       }
       return sprites.typing[ch.dir][ch.frame % 2]
+    case CharacterState.THINK:
+      return sprites.reading[ch.dir][ch.frame % 2]
+    case CharacterState.SEARCHING:
+    case CharacterState.DOCUMENTING:
+      return sprites.reading[ch.dir][ch.frame % 2]
+    case CharacterState.TESTING:
+    case CharacterState.DEBUGGING:
+      return sprites.typing[ch.dir][ch.frame % 2]
+    case CharacterState.WALKING_TO_SERVER:
     case CharacterState.WALK:
       return sprites.walk[ch.dir][ch.frame % 4]
     case CharacterState.IDLE:

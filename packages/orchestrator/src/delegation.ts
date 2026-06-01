@@ -324,7 +324,8 @@ export class DelegationRouter {
         intent: cleanPrompt.slice(0, CONFIG.limits.intentChars),
         phase: "started",
       });
-      target.runTask(taskId, fullPrompt, effectiveRepoPath);
+      const teamChat = this.agentManager.getChatLog();
+      target.runTask(taskId, fullPrompt, effectiveRepoPath, undefined, teamChat);
     };
   }
 
@@ -437,7 +438,8 @@ export class DelegationRouter {
             timestamp: Date.now(),
           });
 
-          reviewerSession.runTask(reReviewTaskId, reReviewPrompt, repoPath);
+          const teamChat = this.agentManager.getChatLog();
+          reviewerSession.runTask(reReviewTaskId, reReviewPrompt, repoPath, undefined, teamChat);
           return; // Handled — skip normal leader forwarding
         }
       }
@@ -552,7 +554,8 @@ export class DelegationRouter {
       timestamp: Date.now(),
     });
 
-    devSession.runTask(fixTaskId, fixPrompt, repoPath);
+    const teamChat = this.agentManager.getChatLog();
+    devSession.runTask(fixTaskId, fixPrompt, repoPath, undefined, teamChat);
     return true;
   }
 
@@ -600,7 +603,10 @@ export class DelegationRouter {
     const originSession = this.agentManager.get(originAgentId);
     if (!originSession) return;
 
-    this.leaderRounds++;
+    const isLead = this.agentManager.isTeamLead(originAgentId);
+    if (isLead) {
+      this.leaderRounds++;
+    }
 
     // Count reviewer results for precise iteration tracking
     for (const r of pending.results) {
@@ -612,7 +618,7 @@ export class DelegationRouter {
     }
 
     // Hard ceiling: force-complete instead of silently returning
-    if (this.leaderRounds > CONFIG.delegation.hardCeilingRounds) {
+    if (isLead && this.leaderRounds > CONFIG.delegation.hardCeilingRounds) {
       console.log(`[ResultBatch] Hard ceiling reached (${CONFIG.delegation.hardCeilingRounds} rounds). Force-completing.`);
 
       const resultLines = pending.results.map(r =>
@@ -668,24 +674,33 @@ export class DelegationRouter {
       isResultTask: true,
       delegationsAtStart: this.totalDelegations,
     });
-    const teamContext = this.agentManager.isTeamLead(originAgentId)
+    const teamContext = isLead
       ? this.agentManager.getTeamRoster()
       : undefined;
 
-    const batchPrompt = this.promptEngine.render("leader-result", {
-      fromName: pending.results.length === 1
-        ? pending.results[0].fromName
-        : `${pending.results.length} team members`,
-      resultStatus: pending.results.every(r => r.statusWord.includes("success"))
-        ? "completed successfully"
-        : "mixed results",
-      resultSummary: resultLines,
-      originalTask: originSession.originalTask ?? "",
-      roundInfo,
-      devPreview: this.lastDevPreview,
-    });
+    let batchPrompt: string;
+    if (isLead) {
+      batchPrompt = this.promptEngine.render("leader-result", {
+        fromName: pending.results.length === 1
+          ? pending.results[0].fromName
+          : `${pending.results.length} team members`,
+        resultStatus: pending.results.every(r => r.statusWord.includes("success"))
+          ? "completed successfully"
+          : "mixed results",
+        resultSummary: resultLines,
+        originalTask: originSession.originalTask ?? "",
+        roundInfo,
+        devPreview: this.lastDevPreview,
+      });
+    } else {
+      // Worker result routing: keep the worker context clear so they continue their role
+      batchPrompt = this.promptEngine.render("worker-result", {
+        resultSummary: resultLines,
+      });
+    }
 
-    console.log(`[ResultBatch] Flushing ${pending.results.length} result(s) to ${originAgentId} (round ${this.leaderRounds}, budget=${CONFIG.delegation.budgetRounds}, ceiling=${CONFIG.delegation.hardCeilingRounds})`);
-    originSession.runTask(followUpTaskId, batchPrompt, undefined, teamContext);
+    console.log(`[ResultBatch] Flushing ${pending.results.length} result(s) to ${originAgentId} (${isLead ? 'Team Lead' : 'Worker'} round ${this.leaderRounds}, budget=${CONFIG.delegation.budgetRounds}, ceiling=${CONFIG.delegation.hardCeilingRounds})`);
+    const teamChat = this.agentManager.getChatLog();
+    originSession.runTask(followUpTaskId, batchPrompt, undefined, teamContext, teamChat);
   }
 }

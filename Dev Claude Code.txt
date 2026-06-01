@@ -1,0 +1,414 @@
+--- PAGE 1 ---
+Claude Code
+คู่มือส ำหรับนักพัฒนำ
+Tips, Tricks, Plugins & Skills ที่ Developer ต้องรู้
+2026  |  BMS Developer Training  |  ชัยพร สุรเตมีย์กุล
+
+--- PAGE 2 ---
+Claude Code คืออะไร?
+Agentic Coding Tool ที่ท ำงำนใน Terminal เข้ำใจ Codebase 
+ของคุณ เขียนโค้ด, แก้บัก, รัน Command และท ำงำนอัตโนมัติได้
+— ไม่ใช่แค่ Autocomplete แต่เป ็ นAI Partner ที่คิดและลงมือท ำ
+เองได้
+อ่าน+เขียนโค้ด อ่ำนไฟล์, แก้ไข, สร ้ำงไฟล์ใหม่ทั้งโปรเจกต์
+รัน Command รัน test, build, lint, git ได้โดยตรง
+วิเคราะห์ Codebase เข้ำใจ architecture, dependencies, patterns
+Git Workflow สร ้ ำงbranch, commit, PR review อัตโนมัติ
+เริ่มต้นใช้งาน
+npm install -g @anthropic-ai/claude-code
+cd your-project && claude
+รองรับ Plans:
+Pro ($20/mo)
+Max5 ($100/mo)
+Max20 ($200/mo)
+API Key (pay per use)
+Models: Sonnet 4.5 / Opus 4.5 / Haiku 4.5
+
+--- PAGE 3 ---
+ค าสั่งและ Shortcuts ที่ต้องรู ้
+Keyboard Shortcuts
+Shift+Tab สลับ Plan / Act Mode
+Escape หยุด Claude / ยกเลิก
+Escape × 2 ดูรำยกำรข้อควำมก่อนหน้ำ
+↑ (Arrow Up) เรียกค ำสั่งก่อนหน้ำ
+Ctrl+V วำงรูปภำพ (ไม่ใช่ Cmd+V)
+Shift+Drag ลำกไฟล์เข้ำ Claude Code
+! command รัน shell command ตรงๆ
+Slash Commands
+/help แสดง commands ทั้งหมด
+/clear ล้ำง context (ใช้บ่อยๆ!)
+/model เปลี่ยน model (Sonnet/Opus)
+/context ดู token usage ป ั จจุบัน
+/plugin จัดกำร plugins
+/mcp ดูสถำนะ MCP servers
+/terminal-setup ตั้งค่ำ terminal
+
+--- PAGE 4 ---
+CLAUDE.md — สมองของ Claude Code
+ไฟล์ CLAUDE.md เป ็ น"หน่วยควำมจ ำถำวร" ของ Claude Code
+ที่จะถูกโหลดทุกครั้งที่เริ่ม session ใหม่ ใช้บอก context,
+coding standards, และ project rules ให้ Claude รู ้
+ต าแหน่งไฟล์:
+~/.claude/CLAUDE.md Global — ใช้กับทุกโปรเจกต์
+./CLAUDE.md Project root — context เฉพำะโปรเจกต์
+./frontend/CLAUDE.md Subfolder — context เฉพำะ module
+ตัวอย่าง CLAUDE.md
+# Project: MyApp
+## Build Commands
+- npm run dev (development)
+- npm run test (run tests)
+- npm run lint (check code)
+## Code Style
+- Use TypeScript strict mode
+- Functional components + hooks
+- Use Zustand for state mgmt
+## Architecture
+- src/components/ → UI
+- src/stores/ → State
+- src/api/ → API calls
+
+--- PAGE 5 ---
+เทคนิคการ Prompt ที่ได้ผลจริง
+กฎทอง: ใช้ Plan Mode ก่อนเสมอ!
+กด Shift+Tab เพื่อเข้ำ Plan Mode → ให้ Claude วิเครำะห์ป ั ญหำส ำรวจทำงเลือก และวำงแผนก่อน แล้วค่อยให้เขียนโค้ด ยิ่งวำงแผนดี
+ผลลัพธ์ยิ่งแม่นย ำ
+1
+ วางแผน "วิเครำะห์ codebase แล้ววำงแผนกำรพัฒนำ feature X ให้หน่อย อย่ำเพิ่งเขียนโค้ด"
+2
+ Review แผน ตรวจสอบแผน ถำมค ำถำมแก้ไข assumptions จนพอใจ
+3
+ สั่งท า "เริ่มเขียนโค้ดตำมแผนได้เลย" — ใช้ "think hard" ส ำหรับงำนซับซ้อน
+4
+ ตรวจ+ทดสอบ Review output, รัน test, ถ้ำมี error ก็ paste error message ให้ Claude แก้
+
+--- PAGE 6 ---
+Prompt แบบไหนได้ผล / ไม่ได้ผล
+✗ แก้บัก
+✓ แก้ null pointer error ใน UserService.getProfile() ตอนหำ user ID ไม่เจอ ให้ return 404 แทน
+crash
+ระบุไฟล์ + ฟั งก์ชัน + พฤติกรรมที่ต้องกำร
+✗ สร ้ ำงหน้ำlogin
+✓ สร ้ ำงหน้ำlogin ด้วย React+TS มี email/password fields, form validation, error handling ใช้
+Button component ที่มีอยู่
+ก ำหนดtech stack + constraints ให้ชัด
+✗ ท ำcheckout flow ทั้งหมด
+✓ เริ่มจำก cart summary component ก่อน แสดง line items, จ ำนวน, รำคำรวม แล้วจะเพิ่ม
+payment ทีหลัง
+แบ่งงำนใหญ่เป็ นชิ้นเล็ก
+
+--- PAGE 7 ---
+MCP Plugins & Extensions ที่ควรติดตั้ง
+Playwright MCP
+Browser automation — เป ิ ดเว็บ, ถ่ำย screenshot, ทดสอบ UI อัตโนมัติ
+claude mcp add playwright npx @playwright/mcp@latest
+GitHub PR Review
+Auto review PR ทุกตัว หำ bug + security issues ที่คนพลำด
+/install-github-app
+Repomix
+Pack codebase เป ็ นformat ที่ AI อ่ำนง่ำย เพิ่ม context ได้เยอะ
+/plugin install repomix-mcp@repomix
+Memory MCP
+Knowledge graph-based persistent memory ข้ำม session
+claude mcp add memory
+SQLite MCP
+จัดกำร database, query, วิเครำะห์ข้อมูลโดยตรง
+claude mcp add sqlite
+Connect Apps
+เชื่อมต่อ Gmail, Slack, GitHub, Notion + 500 services
+/plugin install connect-apps
+
+--- PAGE 8 ---
+Skills, Plugins & Custom Commands
+Skills (โหลดอัตโนมัติตาม context)
+Agent SDK สร ้ ำงAI agents
+Frontend Design สร ้ ำงUI production-grade
+Security Guidance ตรวจสอบ OWASP + secure coding
+Doc Generator สร ้ ำงREADME, API docs อัตโนมัติ
+Performance วิเครำะห์ bottleneck + optimize
+Supabase Skills ท ำงำนกับSupabase ได้ดีขึ้น
+Vue/React Skills Best practices เฉพำะ framework
+สร ้ างCustom Slash Commands
+.claude/commands/review.md
+Review code ใน $ARGUMENTS
+ตรวจ: bugs, security, performance
+แนะน ำกำรปรับปรุง
+ใช้งำน: /project:review src/api/
+โครงสร ้ างPlugin
+my-plugin/
+├── .claude-plugin/
+│   └── plugin.json
+├── commands/
+├── agents/
+├── skills/
+├── hooks/
+└── .mcp.json
+
+--- PAGE 9 ---
+Spec-Kit — Spec-Driven Development
+Spec-Kit by GitHub — เครื่องมือส ำหรับ Spec-Driven Development ที่ก ำหนด "อะไรจะสร ้ ำง" ก่อน แล้วค่อยสร ้ ำงลดกำรเขียนโค้ด
+มั่วๆ ให้ AI ท ำตำมspec อย่ำงเป ็ นระบบ
+1
+ /speckit.constitution ก ำหนดหลักกำรโปรเจกต์(9 principles): Library-First, Test-First, Simplicity...
+2
+ /speckit.specify เขียน spec ว่ำต้องกำรอะไร ไม่ต้องคิดเรื่อง tech — pure product specification
+3
+ /speckit.clarify แก้จุดที่ยังไม่ชัด [NEEDS CLARIFICATION] ตอบค ำถำมท ำproduct decisions
+4
+ /speckit.plan สร ้ ำงแผนtechnical implementation — architecture, tech stack, API design
+5
+ /speckit.tasks แตก plan เป ็ นtasks ย่อย เรียงตำม dependency พร ้ อมบอกparallel [P] tasks
+6
+ /speckit.implement สั่ง Claude ท ำทุกtask ตำม plan + spec จน feature เสร็จสมบูรณ์
+ติดตั้ง: specify init my-project --ai claude          โครงสร้ำง: .speckit/constitution.md, specifications/, plans/, tasks/
+
+--- PAGE 10 ---
+TDD Guard — Test-Driven Development
+TDD Guard บังคับให้ Claude ท ำTDD อัตโนมัติ!
+Block กำรเขียนโค้ดถ้ำยังไม่มี failing test
+Block over-implementation เกินที่ test ต้องกำร
+Red → Green → Refactor
+R G Rf
+🔴 RED เขียน Test ก่อน เขียน test ที่ describe behavior ที่ต้องกำร → รัน → ต้อง FAIL (เพรำะยังไม่มี code)
+🟢 GREEN เขียน Code ให้ผ่าน เขียน minimal code เท่ำที่ test ต้องกำร ห้ำมเขียนเกิน → รัน → ต้อง PASS
+🔵
+REFACTOR ปรับปรุงโค้ด Refactor code ให้สะอำด ลด duplication, ปรับ structure → รัน test อีกที → ต้อง PASS
+เครื่องมือ TDD ส าหรับ Claude Code:
+TDD Guard npm i -g tdd-guard
+Hook ที่ block code ถ้ำไม่มี test
+TDG Plugin /plugin install tdg
+Red-Green-Refactor + atomic commits
+CLAUDE.md TDD เพิ่มใน CLAUDE.md
+"Use TDD. Write test first, then code."
+
+--- PAGE 11 ---
+Best Practice Workflow — ครบทุกขั้นตอน
+INIT 1
+ Setup เขียน CLAUDE.md + .speckit/constitution.md ก ำหนดproject rules, tech stack, coding standards
+SPEC 2
+ Spec /speckit.specify → เขียน spec สิ่งที่ต้องกำร → /speckit.clarify → /speckit.plan → /speckit.tasks
+GIT 3
+ Branch git checkout -b feature/xxx — สร ้ ำงbranch ใหม่ แยกงำนจำก main เสมอ
+TDD 4
+ Test First 🔴 RED: เขียน test ก่อน → รัน → ต้อง FAIL (TDD Guard จะบังคับขั้นตอนนี้)
+TDD 5
+ Implement 🟢 GREEN: ให้ Claude เขียน minimal code ให้ test ผ่ำน → รัน → ต้อง PASS
+TDD 6
+ Refactor 🔵 REFACTOR: ปรับปรุง code quality, ลด duplication → test ยังต้อง PASS
+QA 7
+ Review ตรวจโค้ดทุกบรรทัด: logic, security, edge cases, performance → git add + commit
+SHIP 8
+ PR + Merge สร ้ ำงPR → Claude PR Review ตรวจอัตโนมัติ → แก้ feedback → merge เข้ำ main
+INIT → SPEC → GIT → TDD (Red→Green→Refactor) → QA → SHIP   — ท าซ ้าทุก feature!
+
+--- PAGE 12 ---
+Ralph Loop — Autonomous AI Development
+Official Anthropic Plugin — ให้ Claude ท ำงำนวนซ ้ำจนเสร็จ โดยไม่ต้องดูแล! เหมำะกับงำน refactor, migration, batch tasks ที่มี
+success criteria ชัดเจน
+วิธีท างาน:
+1 คุณสั่ง /ralph-loop พร ้ อมprompt + completion criteria
+2 Claude ท ำงำนตำมprompt → พยำยำม exit
+3 Stop Hook ดักจับ exit → ส่ง prompt เดิมกลับเข้ำไปใหม่
+4 วนซ ้ำจนกว่ำ Claude จะ output completion promise หรือถึง max iterations
+ตัวอย่างค าสั่ง
+/ralph-loop "Migrate tests
+from Jest to Vitest.
+Output <promise>DONE</promise>
+when all pass"
+--max-iterations 30
+Best Practices
+ใส่ --max-iterations เสมอ (ป ้ องกันinfinite loop)
+เขียน success criteria ชัดเจนใน prompt
+ใช้กับงำน greenfield / migration / batch tasks
+หลีกเลี่ยงงำนที่ต้องใช้ judgment มำกๆ
+
+--- PAGE 13 ---
+โจทย์ฝ ึ กหัด— ลองใช้ Claude Code จริง!
+⭐ Beginner 2-3 ชม.REST API Todo App
+สร ้ ำงTodo API ด้วย Node.js/Express มี CRUD, validation, tests
+ใช้: Spec-Kit → TDD → PR Review
+🛠 Spec-Kit + TDD Guard + Jest
+⭐ Beginner 1-2 ชม.CLI Calculator Tool
+สร ้ ำงCLI app ที่รับ input แล้วค ำนวณunit conversion
+ใช้: Plan Mode → TDD → Git Commit
+🛠 CLAUDE.md + TDD + Git
+⭐⭐ Intermediate 1-2 วันBlog Platform + Auth
+Full-stack blog: JWT auth, CRUD posts, markdown, role-based access
+ใช้: Spec-Kit ครบ flow → TDD → Playwright test
+🛠 Spec-Kit + TDD + Playwright MCP
+⭐⭐ Intermediate 1-2 วันReal-time Chat App
+WebSocket chat: rooms, user list, message history, typing indicator
+ใช้: Spec → Subagents (frontend/backend แยก) → E2E test
+🛠 Spec-Kit + Parallel Agents + TDD
+⭐⭐⭐ Advanced 3-5 วันE-commerce Platform
+Product catalog, cart, checkout, payment mock, admin dashboard
+ใช้: Spec-Kit ทั้ง 6 ขั้น → Ralph Loop → PR Review
+🛠 Spec-Kit + Ralph Loop + TDD Guard
+⭐⭐⭐ Advanced 2-3 วันLegacy Code Migration
+Migrate codebase จำก CommonJS → ESM หรือ Jest → Vitest
+ใช้: Ralph Loop วนจนเสร็จ → TDD verify ทุก module
+🛠 Ralph Loop + TDD + Git Branch
+💡 เริ่มจาก Beginner → ท าตามBest Practice Workflow ครบ → ค่อยขยับเป ็ นIntermediate/Advanced
+
+--- PAGE 14 ---
+Advanced Tips & Tricks
+Parallel Agents
+เป ิ ดหลำยClaude Code พร ้ อมกันในtab/pane ต่ำงๆ ท ำงำนคนละส่วน
+ของ codebase ได้
+Skip Permissions
+claude --dangerously-skip-permissions
+หยุดถำมทุก action ให้ Claude ท ำงำนต่อเนื่อง (ระวังใช้กับ prod!)
+"Think Hard" Mode
+ใส่ค ำว่ำ "think hard" หรือ "think ultra hard" ใน prompt
+เพื่อให้ Claude ใช้เวลำคิดมำกขึ้นกับปั ญหำซับซ้อน
+Commit บ่อยๆ
+ใช้ git สร ้ ำงcheckpoint ก่อนให้ AI ท ำงำน
+ถ้ำผลลัพธ์ไม่ดีสำมำรถ rollback ได้ทันที
+ส่ง Error ตรงๆ
+Copy error message ทั้งก้อนส่งให้ Claude อ่ำน
+ไม่ต้อง paraphrase — ให้ AI อ่ำน error จริงเอง
+Screenshots เป ็ นInput
+ลำก screenshot หรือ mockup เข้ำ terminal
+ให้ Claude เห็นและสร ้ ำงUI ตำม design ได้เลย
+Custom Status Line
+ตั้งค่ำ status bar แสดง model, branch, token usage
+ช่วยควบคุม context window ไม่ให้เต็ม
+Subagents
+ให้ Claude สร ้ ำงinstance ย่อยท ำsub-tasks
+เช่น code review, testing แยกกัน ประหยัด tokens
+
+--- PAGE 15 ---
+Context Window, Limitations & Auto-Compact
+Context = 200K tokens — ทุกไฟล์, command output,
+MCP tools, CLAUDE.md กิน tokens ทั้งหมด!
+Auto-Compact (เป ิ ดโดยdefault)
+เมื่อ context ถึง ~75-95% → auto-compact จะท ำงำนอัตโนมัติ
+สรุป conversation เก่ำ → เก็บเฉพำะข้อมูลส ำคัญ → ลบ messages เก่ำ
+ข้อเสีย: อำจ "ลืม" รำยละเอียดส ำคัญที่ถูกสรุปทิ้ง!
+ดีกว่ำ: สั่ง /compact เองตอนเปลี่ยนงำน ไม่ต้องรอ auto
+วิธีจัดการ Context:
+/clear ทุกครั้งที่เริ่มงำนใหม่
+/context ดู token usage เสมอ (อย่ำเกิน 60-70%)
+ใส่ข้อมูลถำวรไว้ใน CLAUDE.md ไม่ต้องพิมพ์ซ ้ำ
+ใช้ Subagents แยกงำนใหญ่ออกเป ็ นcontext ย่อย
+ใช้ -p ส ำหรับ one-shot (ไม่ต้องเป ิ ดsession)
+ป ิ ดMCP ที่ไม่ใช้ — แต่ละตัวกิน 1-3% ของ context
+⚠️ข้อจ ากัดที่ต้องรู ้ (Limitations)
+1 Context Window 200K tokens
+พอใช้งำนนำน context เต็ม → คุณภำพตก → ลืมค ำสั่ง
+MCP tools + system prompt กิน ~10-25% ก่อนเริ่มงำน
+2 Rate Limit (5-hr rolling window)
+Pro: ~40-80 prompts/5hr, Max: 200-800 prompts/5hr
+Weekly cap ด้วย — ใช้หมดต้องรอ reset
+3 Hallucination (ค าตอบผิด)
+Claude อำจแนะน ำcommand/option ที่ไม่มีจริง
+ตรวจสอบ man page, verify ก่อน execute เสมอ!
+4 ไม่มี Memory ข้าม Session
+เริ่ม session ใหม่ = ลืมหมด (ต่ำงจำก Claude.ai)
+เขียน CLAUDE.md เก็บ context ถำวร
+5 Security Risks
+Claude อ่ำน env vars, config files ได้
+อย่ำใช้กับ production data โดยไม่ระวัง
+6 Auto-Compact สูญเสียข้อมูล
+เมื่อ compact อัตโนมัติ → สรุปอำจตกหล่น
+Manual /compact ดีกว่ำ — ควบคุมได้เอง
+
+--- PAGE 16 ---
+Workflow ที่ดีที่สุด ส าหรับ Developer
+1
+ เตรียม CLAUDE.md เขียน project context, build commands, coding standards ให้ครบ
+2
+ git checkpoint Commit งำนป ั จจุบันสร ้ ำงsave point ก่อนให้ AI เริ่มท ำงำน
+3
+ Plan Mode ก่อน Shift+Tab → อธิบำยงำน → ให้ Claude วำงแผนก่อนเขียนโค้ด
+4
+ Prompt ชัดเจน ระบุไฟล์, ฟั งก์ชัน, expected behavior, constraints ให้ครบ
+5
+ Review ทุกบรรทัด อ่ำนโค้ดที่ AI เขียน ตรวจ logic, security, edge cases
+6
+ ทดสอบ+วนซ ้า รัน test, ส่ง error กลับ Claude, ให้แก้จนผ่ำน แล้ว commit
+
+--- PAGE 17 ---
+สิ่งที่ต้องระวังเมื่อใช้ AI Coder
+อย่ารับโค้ดแบบไม่ตรวจ
+AI อำจสร ้ำงโค้ดที่ดูถูกต้องแต่มี logic error ซ่อนอยู่ ต้องอ่ำนทุกบรรทัด
+ก่อน commit
+ระวัง Security
+AI อำจไม่ปฏิบัติตำม security practices เช็ค hardcoded secrets, SQL 
+injection, auth issues
+อย่าข้ามการทดสอบ
+ห้ำมสมมติว่ำโค้ด AI ท ำงำนถูกรัน test ทุกครั้ง ตรวจ edge cases ทุกจุด
+อย่าพึ่ง AI เกินไป
+ใช้ AI เพื่อเพิ่มควำมสำมำรถ ไม่ใช่แทนที่ควำมเข้ำใจ คุณต้องรู ้ ว่ำโค้ดดีควร
+เป ็ นแบบไหน
+ระวัง Context Window เต็ม
+เมื่อ context เต็ม Claude จะเริ่มลืมและท ำผิด ใช้ /clear + /context ติดตำม
+เสมอ
+อย่าใช้ --dangerously กับ Prod
+skip-permissions mode ดีส ำหรับ dev แต่อย่ำใช้กับ
+production/sensitive code
+
+--- PAGE 18 ---
+CLI Patterns ที่นักพัฒนาต้องรู ้
+Headless Mode (-p)
+claude -p "มีกี่ไฟล์ในโปรเจกต์?"
+รันแบบ one-shot ไม่ต้องเป ิ ดinteractive
+Pipe Input
+cat error.log | claude -p "วิเครำะห์ error นี้"
+ส่ง output ของ command อื่นเข้ำ Claude
+Chain Commands
+claude "checkout new branch and lint"
+สั่ง Claude ท ำหลำยtasks ต่อเนื่อง
+File Reference
+claude "อธิบำย src/api/auth.ts"
+Tab-complete ชื่อไฟล์ในค ำสั่ง
+URL Context
+claude "ดู issue นี้แล้วแก้: [URL]"
+ส่ง URL ของ issue, docs, SO ให้ Claude อ่ำน
+Image Feedback
+[ลำกรูปเข้ำ terminal]
+ส่ง screenshot/mockup เพื่อให้สร ้ำง UI
+
+--- PAGE 19 ---
+Claude Code ท าอะไรได้อีก— ไม่ใช่แค่เขียนโค้ด!
+🖥️System Admin / DevOps
+วิเครำะห์ป ั ญหำserver, แก้ config nginx/Docker/PostgreSQL
+Mount SSHFS แล้วให้ Claude แก้ config production ได้เลย
+"ตรวจสอบท ำไมDocker container ต่อ PostgreSQL ไม่ได้"
+🔍 Investigate & Debug
+วิเครำะห์ log files, หำ root cause ของ error, scan port
+Nmap, tcpdump, strace — สั่งให้ Claude วิเครำะห์ได้
+"อ่ำน error log 3 วันย้อนหลัง หำ pattern ที่เกิดซ ้ำ"
+📦 Install & Setup Software
+ติดตั้ง software, config environment, setup SSL cert
+Claude อ่ำน docs → ลง dependencies → config → test ให้หมด
+"ติดตั้ง Nginx + Let's Encrypt SSL บน Ubuntu 24"
+📄 จัดการไฟล์ & Data Processing
+Rename/organize ไฟล์, แปลง CSV→JSON, merge data
+จัดกำร spreadsheet, clean data, batch convert formats
+"จัดเรียงไฟล์ 500 รูป ตำมวันที่ถ่ำยใน EXIF"
+📝 เขียนเอกสาร & Documentation
+สร ้ ำงREADME, API docs, แปลงโค้ดเป ็ นtechnical docs
+เขียน PRD, spec, proposal จำก codebase ที่มีอยู่
+"วิเครำะห์ codebase แล้วสร้ำง API documentation"
+🔒 Security Review & Monitoring
+สแกน vulnerability, ตรวจ config security, audit permissions
+ตรวจ Nagios/Prometheus, วิเครำะห์ security alerts
+"review nginx config หำ security issues"
+🤖 สร ้ างAgent & Automation
+สร ้ ำงagent ที่ท ำงำนซ ้ำๆ อัตโนมัติ เช่น PR triage,
+ticket classification, batch file processing ด้วย SDK
+"สร้ำง agent ตรวจ PR แล้ว auto-comment feedback"
+🎓 เรียนรู ้& Research
+ให้ Claude อธิบำย technology ใหม่ๆ พร ้ อมhands-on
+ทดลอง config → ดูผล → อธิบำยว่ำท ำไม— interactive learning
+"อธิบำย Kubernetes networking แล้วสร้ำง lab ให้ทดลอง"
+
+--- PAGE 20 ---
+สรุปสิ่งส าคัญ
+ใช้ Plan Mode ก่อนเสมอ — ยิ่งวำงแผนดี ผลลัพธ์ยิ่งดี
+เขียน CLAUDE.md + Spec-Kit — Specify → Plan → Tasks → Implement
+บังคับ TDD ด้วย TDD Guard — Red → Green → Refactor ทุก feature
+ใช้ Ralph Loop ส ำหรับงำน batch — วนจนเสร็จโดยอัตโนมัติ
+จัดกำร Context + Git Workflow — /clear บ่อย, Branch, PR Review
+เริ่มฝึ กจำกโจทย์จริง — ท ำตำมworkflow ครบ ทีละ level
+Spec → Test → Code → Review → Ship — ท ำซ ้ำอย่ำงเป็นระบบแล้ว Claude Code จะเป็น Partner ที่ดีที่สุดของคุณ

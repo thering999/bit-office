@@ -34,6 +34,8 @@ export const CONFIG = {
     dequeueDelayMs: 100,
     /** Delay before retrying a failed task (ms) */
     retryDelayMs: 500,
+    /** Inactivity timeout — no output for this long means it's stuck (ms) */
+    inactivityTimeoutMs: 5 * 60 * 1000, // 5 minutes
   },
 
   limits: {
@@ -64,5 +66,12 @@ export const CONFIG = {
       ".rb": "ruby",
       ".sh": "bash",
     } as Record<string, string>,
+  },
+
+  memory: {
+    /** Enable vector memory (Qdrant) — requires QDRANT_HOST/PORT */
+    enabled: true,
+    /** After this many consecutive connection failures, skip vector ops for this session */
+    consecutiveFailsThreshold: 5,
   },
 } as const;

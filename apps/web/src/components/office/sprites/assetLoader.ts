@@ -7,6 +7,7 @@ import type { SpriteData, OfficeLayout } from '../types'
 import { setCharacterTemplates } from './spriteData'
 import { setFloorSprites } from '../floorTiles'
 import { setWallSprites } from '../wallTiles'
+import { resolveAssetPath } from '@/lib/assets'
 
 // ── Constants ──────────────────────────────────────────────────
 
@@ -136,7 +137,7 @@ async function loadCharacterSprites(): Promise<CharacterDirectionSprites[]> {
   const characters: CharacterDirectionSprites[] = []
 
   for (let ci = 0; ci < CHAR_COUNT; ci++) {
-    const img = await loadImage(`/assets/characters/char_${ci}.png`)
+    const img = await loadImage(resolveAssetPath(`/assets/characters/char_${ci}.png`))
     const charData: CharacterDirectionSprites = { down: [], up: [], right: [] }
 
     for (let dirIdx = 0; dirIdx < CHAR_DIRECTIONS.length; dirIdx++) {
@@ -159,7 +160,7 @@ async function loadCharacterSprites(): Promise<CharacterDirectionSprites[]> {
 // ── Wall loading ───────────────────────────────────────────────
 
 async function loadWallTileSprites(): Promise<SpriteData[]> {
-  const img = await loadImage('/assets/walls.png')
+  const img = await loadImage(resolveAssetPath('/assets/walls.png'))
   const sprites: SpriteData[] = []
 
   for (let mask = 0; mask < WALL_BITMASK_COUNT; mask++) {
@@ -336,7 +337,7 @@ async function loadTilesetFurniture(): Promise<LoadedTilesetSprites> {
 
   let img: HTMLImageElement | null = null
   try {
-    img = await loadImage(`/Office%20Tileset/Office%20Tileset%20All%2016x16.png?v=${Date.now()}`)
+    img = await loadImage(resolveAssetPath('/assets/office-tileset.png'))
     console.log(`[tileset] loaded ${img.naturalWidth}×${img.naturalHeight}`)
   } catch {
     console.warn('[tileset] tileset image not found, using fallback sprites only')
@@ -365,7 +366,7 @@ async function loadTilesetFurniture(): Promise<LoadedTilesetSprites> {
 
 async function loadLayoutJson(): Promise<OfficeLayout | null> {
   try {
-    const resp = await fetch('/pixel-agents-layout.json')
+    const resp = await fetch(resolveAssetPath('/pixel-agents-layout.json'))
     if (!resp.ok) return null
     const data = await resp.json()
     if (data && data.version === 1 && Array.isArray(data.tiles)) {

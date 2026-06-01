@@ -50,7 +50,7 @@ export const telegramChannel: Channel = {
 
   async init(commandHandler: (cmd: Command, meta: CommandMeta) => void): Promise<boolean> {
     const tokens = config.telegramBotTokens;
-    if (!tokens.length || tokens.every((t) => !t)) return false;
+    if (!tokens.length || tokens.every((t: string | null | undefined) => !t)) return false;
 
     for (let i = 0; i < tokens.length && i < PRESETS.length; i++) {
       const token = tokens[i];

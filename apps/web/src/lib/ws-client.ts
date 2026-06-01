@@ -1,5 +1,6 @@
 import { GatewayEventSchema } from "@office/shared";
 import { useOfficeStore } from "@/store/office-store";
+import { clearConnection } from "@/lib/storage";
 
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -42,23 +43,28 @@ function doConnect() {
       socket.send(JSON.stringify({ type: "AUTH", sessionToken: currentSessionToken }));
     }
     useOfficeStore.getState().setConnected(true);
-    // Send PING to get current agent statuses
-    if (socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "PING" }));
-    }
+    // Note: Don't send PING here, wait for AUTH_OK or just send AUTH and let server respond
   };
 
   socket.onmessage = (evt) => {
     try {
       const msg = JSON.parse(evt.data);
+      // Handle AUTH_OK: send PING now that we are authorized
+      if (msg.type === "AUTH_OK") {
+        console.log("[WS] Auth successful, syncing state");
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "PING" }));
+        }
+        return;
+      }
       // Handle AUTH_FAILED: clear stale connection, redirect to re-pair
       if (msg.type === "AUTH_FAILED") {
         console.log("[WS] AUTH_FAILED — clearing connection and redirecting to /pair");
         cleanup();
         currentUrl = null;
-        const { clearConnection } = require("@/lib/storage");
         clearConnection();
-        window.location.href = "/pair";
+        const prefix = window.location.pathname.startsWith("/bit-office") ? "/bit-office" : "";
+        window.location.href = `${prefix}/pair`;
         return;
       }
       const event = GatewayEventSchema.parse(msg);

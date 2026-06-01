@@ -16,7 +16,19 @@
     "build:desktop": "pnpm --filter bit-office-desktop build"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.6",
     "concurrently": "^9.2.1",
-    "typescript": "^5.7.0"
+    "shx": "^0.4.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.6",
+    "ws": "^8.19.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp",
+      "better-sqlite3"
+    ]
   }
 }

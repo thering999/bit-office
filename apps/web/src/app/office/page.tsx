@@ -2,10 +2,11 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { AnimatePresence } from "framer-motion";
 import { useOfficeStore, folderPickCallbacks, imageUploadCallbacks } from "@/store/office-store";
 import type { ChatMessage, TeamChatMessage, TeamPhaseState } from "@/store/office-store";
 import { connect, sendCommand } from "@/lib/connection";
-import { getConnection } from "@/lib/storage";
+import { getConnection, getGatewayHttpUrl } from "@/lib/storage";
 import { nanoid } from "nanoid";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -19,8 +20,13 @@ import { useEditorActions, loadLayoutFromStorage, saveLayoutToStorage } from "@/
 import { useEditorKeyboard } from "@/hooks/useEditorKeyboard";
 import { migrateLayoutColors } from "@/components/office/layout/layoutSerializer";
 import type { SceneAdapter } from "@/components/office/scene/SceneAdapter";
+import { useOfficeUI } from "@/hooks/use-office-ui";
 import { useSceneBridge } from "@/components/office/scene/useSceneBridge";
 import dynamic from "next/dynamic";
+
+import { resolveAssetPath } from "@/lib/assets";
+import { isCloudMode, cloudAI } from "@/lib/cloud-ai";
+
 const PixelOfficeScene = dynamic(() => import("@/components/office/scene/PixelOfficeScene"), { ssr: false });
 const EditorToolbar = dynamic(() => import("@/components/office/editor/EditorToolbar"), { ssr: false });
 const ZoomControls = dynamic(() => import("@/components/office/ui/ZoomControls"), { ssr: false });
@@ -28,6 +34,13 @@ const SettingsModal = dynamic(() => import("@/components/office/ui/SettingsModal
 const BottomToolbar = dynamic(() => import("@/components/office/ui/BottomToolbar"), { ssr: false });
 const ProjectHistory = dynamic(() => import("@/components/office/ui/ProjectHistory"), { ssr: false });
 const OfficeSwitcher = dynamic(() => import("@/components/office/ui/OfficeSwitcher"), { ssr: false });
+import { SwarmHealthDashboard } from "@/components/office/ui/SwarmHealthDashboard";
+import { ThoughtStreamSidebar } from "@/components/office/ui/ThoughtStreamSidebar";
+const AgentManagementModal = dynamic(() => import("@/components/office/ui/AgentManagementModal"), { ssr: false });
+const SpriteAvatar = dynamic(() => import("@/components/office/sprites/SpriteAvatar"), { ssr: false });
+const VoiceInputButton = dynamic(() => import("@/components/office/ui/VoiceInputButton").then(m => m.VoiceInputButton), { ssr: false });
+const GodsEyeView = dynamic(() => import("@/components/office/ui/GodsEyeView").then(m => m.GodsEyeView), { ssr: false });
+const KnowledgeModal = dynamic(() => import("@/components/office/ui/KnowledgeModal").then(m => m.KnowledgeModal), { ssr: false });
 
 const STATUS_CONFIG: Record<string, { color: string; label: string }> = {
   idle: { color: "#7a7060", label: "Idle" },
@@ -202,6 +215,7 @@ function TeamOverviewStrip({
     messages?: Array<{ text: string }>;
     pendingApproval?: { title: string; summary: string } | null;
     isTeamLead?: boolean;
+    isFailover?: boolean;
   }>;
   selectedAgent: string | null;
   onSelect: (agentId: string) => void;
@@ -254,6 +268,7 @@ function TeamOverviewStrip({
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={{ color: "#eddcb8", fontSize: 12, fontWeight: 700, fontFamily: TERM_FONT }}>{agent.name}</span>
                     {agent.isTeamLead && <span style={{ fontSize: 9, padding: "1px 4px", border: "1px solid #e8903060", color: "#e89030", fontFamily: TERM_FONT }}>LEAD</span>}
+                    {agent.isFailover && <span style={{ fontSize: 9, padding: "1px 4px", border: "1px solid #e8b04060", backgroundColor: "#e8b04015", color: "#e8b040", fontFamily: TERM_FONT }}>FAILOVER</span>}
                   </div>
                   <div style={{ color: "#7a6858", fontSize: 10, fontFamily: TERM_FONT }}>{agent.role}</div>
                 </div>
@@ -483,11 +498,12 @@ function ConfettiOverlay() {
 }
 
 /** Compute expected preview URL from result metadata (no server started yet) */
-function computePreviewUrl(result: { previewUrl?: string; previewCmd?: string; previewPort?: number; previewPath?: string; entryFile?: string }): string | undefined {
+function computePreviewUrl(result: { previewUrl?: string; previewCmd?: string; previewPort?: number; previewPath?: string; entryFile?: string }, gatewayUrl?: string): string | undefined {
   if (result.previewUrl) return result.previewUrl;
-  if (result.previewCmd && result.previewPort) return "http://localhost:9101";
-  if (result.previewPath) return `http://localhost:9100/${result.previewPath.split("/").pop()}`;
-  if (result.entryFile && /\.html?$/i.test(result.entryFile)) return `http://localhost:9100/${result.entryFile.split("/").pop()}`;
+  const base = gatewayUrl || (typeof window !== "undefined" ? window.location.origin : "http://localhost:9100");
+  if (result.previewCmd && result.previewPort) return `${base.replace(/:[0-9]+$/, "")}:9101`; // fallback to 9101 for preview command
+  if (result.previewPath) return `${base}/${result.previewPath.split("/").pop()}`;
+  if (result.entryFile && /\.html?$/i.test(result.entryFile)) return `${base}/${result.entryFile.split("/").pop()}`;
   return undefined;
 }
 
@@ -628,7 +644,7 @@ function CelebrationModal({ previewUrl, previewPath, onPreview, onDismiss, previ
               onClick={() => {
                 const cmd = buildPreviewCommand({ previewPath, previewCmd, previewPort, projectDir, entryFile });
                 if (cmd) sendCommand(cmd);
-                const url = computePreviewUrl(resultInfo);
+                const url = computePreviewUrl(resultInfo, getGatewayHttpUrl());
                 if (url) onPreview(url);
               }}
               style={{
@@ -1161,7 +1177,7 @@ function MessageBubble({ msg, agentName, onPreview, isTeamLead, isTeamMember, te
         )}
         {changedFiles.length > 0 && <div style={{ color: TERM_DIM, fontSize: 11, marginTop: 2 }}>{changedFiles.length} files changed</div>}
         <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-          {hasWebPreview(r) && onPreview && <button className="term-btn" onClick={() => { const cmd = buildPreviewCommand(r); if (cmd) sendCommand(cmd); const url = computePreviewUrl(r); if (url) onPreview(url); }} style={btnStyle} onMouseEnter={btnHover} onMouseLeave={btnLeave}>preview</button>}
+          {hasWebPreview(r) && onPreview && <button className="term-btn" onClick={() => { const cmd = buildPreviewCommand(r); if (cmd) sendCommand(cmd); const url = computePreviewUrl(r, getGatewayHttpUrl()); if (url) onPreview(url); }} style={btnStyle} onMouseEnter={btnHover} onMouseLeave={btnLeave}>preview</button>}
           {!hasWebPreview(r) && buildPreviewCommand(r) && <button className="term-btn" onClick={() => { const cmd = buildPreviewCommand(r); if (cmd) sendCommand(cmd); }} style={btnStyle} onMouseEnter={btnHover} onMouseLeave={btnLeave}>launch</button>}
         </div>
       </div>
@@ -1207,34 +1223,6 @@ function MessageBubble({ msg, agentName, onPreview, isTeamLead, isTeamMember, te
   );
 }
 
-function SpriteAvatar({ palette, zoom = 3, ready }: { palette: number; zoom?: number; ready?: boolean }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const sprite = getCharacterThumbnail(palette);
-    if (!sprite) return;
-    const h = sprite.length;
-    const w = sprite[0]?.length ?? 0;
-    canvas.width = w * zoom;
-    canvas.height = h * zoom;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    for (let r = 0; r < h; r++) {
-      for (let c = 0; c < w; c++) {
-        const color = sprite[r][c];
-        if (color) {
-          ctx.fillStyle = color;
-          ctx.fillRect(c * zoom, r * zoom, zoom, zoom);
-        }
-      }
-    }
-  }, [palette, zoom, ready]);
-
-  return <canvas ref={canvasRef} style={{ width: 16 * zoom, height: 32 * zoom, imageRendering: "pixelated" }} />;
-}
 
 
 
@@ -1271,7 +1259,7 @@ function LoadingOverlay({ visible }: { visible: boolean }) {
 
   if (removed || !mounted) return null;
 
-  const sheetUrl = `/assets/characters/char_${charIdx}.png`;
+  const sheetUrl = resolveAssetPath(`/assets/characters/char_${charIdx}.png`);
   const zoom = 4;
   const displayW = 16 * zoom; // 64
   const displayH = 32 * zoom; // 128
@@ -1343,12 +1331,13 @@ function LoadingDots() {
   return <>{dots}</>;
 }
 
-const BACKEND_OPTIONS = [
+const DEFAULT_BACKEND_OPTIONS = [
   { id: "claude", name: "Claude", color: "#d97706" },
-  { id: "codex", name: "Codex", color: "#a855f7" },
-  { id: "gemini", name: "Gemini", color: "#3b82f6" },
+  { id: "gemini-rotating", name: "Gemini (Rotating)", color: "#3b82f6" },
+  { id: "ollama-local", name: "Ollama (Local)", color: "#a855f7" },
   { id: "aider", name: "Aider", color: "#22c55e" },
   { id: "opencode", name: "OpenCode", color: "#06b6d4" },
+  { id: "codex", name: "Codex", color: "#6366f1" },
 ];
 
 const PERSONALITY_PRESETS = [
@@ -1375,555 +1364,37 @@ const SKILLS_MAP: Record<string, string[]> = {
   "QA Engineer":     ["Testing", "Cypress", "Jest", "Playwright", "Automation", "CI/CD", "Performance", "A11y"],
 };
 
-function CreateAgentModal({ onSave, onClose, assetsReady, editAgent }: {
-  onSave: (agent: AgentDefinition) => void;
-  onClose: () => void;
-  assetsReady?: boolean;
-  editAgent?: AgentDefinition | null;
-}) {
-  const [palette, setPalette] = useState(editAgent?.palette ?? 0);
-  const [name, setName] = useState(editAgent?.name ?? "");
+const TEAM_MSG_COLORS: Record<string, { bg: string; border: string; label: string }> = {
+  status:   { bg: "#2a221a", border: "#6a5848", label: "STATUS" },
+  chat:     { bg: "#1a222a", border: "#3b82f6", label: "CHAT" },
+  task:     { bg: "#1a2a22", border: "#22c55e", label: "TASK" },
+  error:    { bg: "#2a1a1a", border: "#ef4444", label: "ERROR" },
+  thought:  { bg: "#251a2a", border: "#a855f7", label: "THOUGHT" },
+};
 
-  // Role: preset index (-1 = custom)
-  const [rolePresetIndex, setRolePresetIndex] = useState<number>(() => {
-    if (!editAgent?.role) return 0;
-    const idx = ROLE_PRESETS.indexOf(editAgent.role as typeof ROLE_PRESETS[number]);
-    return idx >= 0 ? idx : -1;
-  });
-  const [customRole, setCustomRole] = useState(() => {
-    if (!editAgent?.role) return "";
-    const idx = ROLE_PRESETS.indexOf(editAgent.role as typeof ROLE_PRESETS[number]);
-    return idx >= 0 ? "" : editAgent.role;
-  });
-
-  // Skills: set of selected tags
-  const [selectedSkills, setSelectedSkills] = useState<Set<string>>(() => {
-    if (!editAgent?.skills) return new Set(SKILLS_MAP[ROLE_PRESETS[0]]?.slice(0, 4) ?? []);
-    return new Set(editAgent.skills.split(",").map((s) => s.trim()).filter(Boolean));
-  });
-  const [customSkillInput, setCustomSkillInput] = useState("");
-
-  const currentRole = rolePresetIndex >= 0 ? ROLE_PRESETS[rolePresetIndex] : customRole.trim();
-  const suggestedSkills = rolePresetIndex >= 0 ? (SKILLS_MAP[ROLE_PRESETS[rolePresetIndex]] ?? []) : [];
-
-  const handleRoleChange = (idx: number) => {
-    setRolePresetIndex(idx);
-    if (idx >= 0) {
-      const preset = ROLE_PRESETS[idx];
-      const suggested = SKILLS_MAP[preset] ?? [];
-      // Auto-select first 4 if no matching skills already selected
-      const hasMatching = suggested.some((s) => selectedSkills.has(s));
-      if (!hasMatching) {
-        setSelectedSkills(new Set(suggested.slice(0, 4)));
-      }
-    }
-  };
-
-  const toggleSkill = (skill: string) => {
-    setSelectedSkills((prev) => {
-      const next = new Set(prev);
-      if (next.has(skill)) next.delete(skill);
-      else next.add(skill);
-      return next;
-    });
-  };
-
-  const addCustomSkill = () => {
-    const skill = customSkillInput.trim();
-    if (skill && !selectedSkills.has(skill)) {
-      setSelectedSkills((prev) => new Set(prev).add(skill));
-      setCustomSkillInput("");
-    }
-  };
-
-  const [personalityMode, setPersonalityMode] = useState<number>(() => {
-    if (!editAgent) return 0;
-    const idx = PERSONALITY_PRESETS.findIndex((p) => p.value === editAgent.personality);
-    return idx >= 0 ? idx : 4; // 4 = custom
-  });
-  const [customPersonality, setCustomPersonality] = useState(editAgent?.personality ?? "");
-
-  const currentPersonality = personalityMode < 4
-    ? PERSONALITY_PRESETS[personalityMode].value
-    : customPersonality;
-
-  const handleSave = () => {
-    if (!name.trim()) return;
-    const id = editAgent
-      ? editAgent.id
-      : (name.trim().toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, "-").replace(/^-|-$/g, "") || "agent") + `-${nanoid(4)}`;
-    onSave({
-      id,
-      name: name.trim(),
-      role: currentRole,
-      skills: Array.from(selectedSkills).join(", "),
-      personality: currentPersonality,
-      palette,
-      isBuiltin: editAgent?.isBuiltin ?? false,
-      teamRole: editAgent?.teamRole ?? "dev",
-    });
-  };
-
-  return (
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.6)",
-        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 110,
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          backgroundColor: TERM_PANEL, padding: "18px 18px 14px",
-          width: "90%", maxWidth: 400, border: "2px solid #1a2a1a",
-          boxShadow: "4px 4px 0px rgba(0,0,0,0.5)",
-          maxHeight: "90vh", overflowY: "auto",
-        }}
-      >
-        <h2 className="px-font" style={{ fontSize: 14, margin: "0 0 12px", textAlign: "center", color: "#e8b040", letterSpacing: "0.05em" }}>
-          {editAgent ? "Edit Agent" : "Create Agent"}
-        </h2>
-
-        {/* Avatar palette selector */}
-        <div style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 12, color: "#7a6858", marginBottom: 4, fontFamily: "monospace", letterSpacing: "0.05em" }}>AVATAR</div>
-          <div style={{ display: "flex", gap: 4 }}>
-            {[0, 1, 2, 3, 4, 5].map((p) => (
-              <button
-                key={p}
-                onClick={() => setPalette(p)}
-                style={{
-                  padding: 3, border: palette === p ? "2px solid #e8b040" : "2px solid #1a2a1a",
-                  backgroundColor: palette === p ? "#382800" : "transparent",
-                  cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
-                }}
-              >
-                <SpriteAvatar palette={p} zoom={2} ready={assetsReady} />
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Name */}
-        <div style={{ marginBottom: 8 }}>
-          <div style={{ fontSize: 12, color: "#7a6858", marginBottom: 4, fontFamily: "monospace", letterSpacing: "0.05em" }}>NAME</div>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Agent name"
-            style={{
-              width: "100%", padding: "7px 10px", fontSize: 14, fontFamily: "monospace",
-              border: "1px solid #1a2a1a", backgroundColor: "#14112a", color: "#eddcb8",
-              boxSizing: "border-box",
-            }}
-          />
-        </div>
-
-        {/* Role */}
-        <div style={{ marginBottom: 8 }}>
-          <div style={{ fontSize: 12, color: "#7a6858", marginBottom: 4, fontFamily: "monospace", letterSpacing: "0.05em" }}>ROLE</div>
-          <select
-            value={rolePresetIndex}
-            onChange={(e) => handleRoleChange(Number(e.target.value))}
-            style={{
-              width: "100%", padding: "7px 10px", fontSize: 14, fontFamily: "monospace",
-              border: "1px solid #1a2a1a", backgroundColor: "#14112a", color: "#eddcb8",
-              boxSizing: "border-box", cursor: "pointer",
-            }}
-          >
-            {ROLE_PRESETS.map((r, i) => (
-              <option key={r} value={i}>{r}</option>
-            ))}
-            <option value={-1}>Custom...</option>
-          </select>
-          {rolePresetIndex === -1 && (
-            <input
-              value={customRole}
-              onChange={(e) => setCustomRole(e.target.value)}
-              placeholder="e.g. Python Expert"
-              style={{
-                width: "100%", padding: "7px 10px", fontSize: 14, fontFamily: "monospace",
-                border: "1px solid #1a2a1a", backgroundColor: "#14112a", color: "#eddcb8",
-                boxSizing: "border-box", marginTop: 4,
-              }}
-            />
-          )}
-        </div>
-
-        {/* Skills */}
-        <div style={{ marginBottom: 8 }}>
-          <div style={{ fontSize: 12, color: "#7a6858", marginBottom: 4, fontFamily: "monospace", letterSpacing: "0.05em" }}>SKILLS</div>
-          {/* Suggested skill chips */}
-          {suggestedSkills.length > 0 && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 8 }}>
-              {suggestedSkills.map((skill) => {
-                const active = selectedSkills.has(skill);
-                return (
-                  <button
-                    key={skill}
-                    onClick={() => toggleSkill(skill)}
-                    style={{
-                      padding: "4px 10px", fontSize: 13, fontFamily: "monospace",
-                      border: active ? "1px solid #e8b04080" : "1px solid #1a2a1a",
-                      backgroundColor: active ? "#382800" : "transparent",
-                      color: active ? "#e8b040" : "#7a6858",
-                      cursor: "pointer",
-                    }}
-                  >{skill}</button>
-                );
-              })}
-            </div>
-          )}
-          {/* Custom-added skills (not in suggested) */}
-          {(() => {
-            const customTags = Array.from(selectedSkills).filter((s) => !suggestedSkills.includes(s));
-            if (customTags.length === 0) return null;
-            return (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 8 }}>
-                {customTags.map((skill) => (
-                  <span
-                    key={skill}
-                    style={{
-                      padding: "4px 10px", fontSize: 13, fontFamily: "monospace",
-                      border: "1px solid #5aacff60", backgroundColor: "#182844",
-                      color: "#5aacff", display: "flex", alignItems: "center", gap: 4,
-                    }}
-                  >
-                    {skill}
-                    <span
-                      onClick={() => toggleSkill(skill)}
-                      style={{ cursor: "pointer", fontSize: 15, lineHeight: 1, color: "#5aacff80" }}
-                    >&times;</span>
-                  </span>
-                ))}
-              </div>
-            );
-          })()}
-          {/* Add custom skill */}
-          <div style={{ display: "flex", gap: 4 }}>
-            <input
-              value={customSkillInput}
-              onChange={(e) => setCustomSkillInput(e.target.value)}
-              onKeyDown={(e) => { if (isRealEnter(e)) { e.preventDefault(); addCustomSkill(); } }}
-              placeholder="Add custom skill..."
-              style={{
-                flex: 1, padding: "6px 10px", fontSize: 13, fontFamily: "monospace",
-                border: "1px solid #1a2a1a", backgroundColor: "#14112a", color: "#eddcb8",
-                boxSizing: "border-box",
-              }}
-            />
-            <button
-              onClick={addCustomSkill}
-              style={{
-                padding: "5px 12px", fontSize: 15, fontWeight: 700,
-                border: "1px solid #1a2a1a", backgroundColor: "transparent",
-                color: "#7a6858", cursor: "pointer", fontFamily: "monospace",
-              }}
-            >+</button>
-          </div>
-        </div>
-
-        {/* Personality */}
-        <div style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 12, color: "#7a6858", marginBottom: 4, fontFamily: "monospace", letterSpacing: "0.05em" }}>PERSONALITY</div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-            {PERSONALITY_PRESETS.map((p, i) => (
-              <label
-                key={i}
-                style={{
-                  display: "flex", alignItems: "center", gap: 6, padding: "4px 6px",
-                  cursor: "pointer", fontSize: 13, color: personalityMode === i ? "#eddcb8" : "#7a6858",
-                  fontFamily: "monospace",
-                }}
-              >
-                <input
-                  type="radio"
-                  name="personality"
-                  checked={personalityMode === i}
-                  onChange={() => setPersonalityMode(i)}
-                  style={{ accentColor: "#e8b040", cursor: "pointer" }}
-                />
-                {p.label}
-              </label>
-            ))}
-            <label
-              style={{
-                display: "flex", alignItems: "center", gap: 6, padding: "4px 6px",
-                cursor: "pointer", fontSize: 13, color: personalityMode === 4 ? "#eddcb8" : "#7a6858",
-                fontFamily: "monospace",
-              }}
-            >
-              <input
-                type="radio"
-                name="personality"
-                checked={personalityMode === 4}
-                onChange={() => setPersonalityMode(4)}
-                style={{ accentColor: "#e8b040", cursor: "pointer" }}
-              />
-              Custom
-            </label>
-            {personalityMode === 4 && (
-              <textarea
-                value={customPersonality}
-                onChange={(e) => setCustomPersonality(e.target.value)}
-                placeholder="Describe the personality..."
-                rows={2}
-                style={{
-                  width: "100%", padding: "7px 10px", fontSize: 13, fontFamily: "monospace",
-                  border: "1px solid #1a2a1a", backgroundColor: "#14112a", color: "#eddcb8",
-                  resize: "vertical", boxSizing: "border-box", marginTop: 2,
-                }}
-              />
-            )}
-          </div>
-        </div>
-
-        {/* Buttons */}
-        <div style={{ display: "flex", gap: 6 }}>
-          <button
-            onClick={handleSave}
-            style={{
-              flex: 1, padding: "9px", border: "1px solid #e8b04060",
-              backgroundColor: "#382800", color: "#e8b040", fontSize: 14,
-              fontWeight: 700, cursor: "pointer", fontFamily: "monospace",
-              opacity: name.trim() ? 1 : 0.4,
-            }}
-            disabled={!name.trim()}
-          >
-            {editAgent ? "Save" : "Create"}
-          </button>
-          <button
-            onClick={onClose}
-            style={{
-              padding: "9px 16px",
-              border: "1px solid #1a2a1a", backgroundColor: "transparent",
-              color: "#6a5848", fontSize: 14, cursor: "pointer", fontFamily: "monospace",
-            }}
-          >Cancel</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function HireModal({ agentDefs, onHire, onCreate, onEdit, onDelete, onClose, assetsReady }: {
-  agentDefs: AgentDefinition[];
-  onHire: (def: AgentDefinition, backend: string, workDir?: string) => void;
-  onCreate: () => void;
-  onEdit: (def: AgentDefinition) => void;
-  onDelete: (id: string) => void;
-  onClose: () => void;
-  assetsReady?: boolean;
-}) {
-  const [selectedBackend, setSelectedBackend] = useState("claude");
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const [workDir, setWorkDir] = useState<string>("");
-
-  // Leaders can only work in teams, not as solo agents
-  const builtinAgents = agentDefs.filter((a) => a.isBuiltin && a.teamRole !== "leader");
-  const customAgents = agentDefs.filter((a) => !a.isBuiltin && a.teamRole !== "leader");
-
-  return (
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.6)",
-        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          backgroundColor: TERM_PANEL, padding: "18px 18px 14px",
-          width: "90%", maxWidth: 420, border: "2px solid #1a2a1a",
-          boxShadow: "4px 4px 0px rgba(0,0,0,0.5)",
-          maxHeight: "90vh", overflowY: "auto",
-        }}
-      >
-        <h2 className="px-font" style={{ fontSize: 14, margin: "0 0 14px", textAlign: "center", color: "#e8b040", letterSpacing: "0.05em" }}>Hire Agent</h2>
-
-        {/* Backend selector */}
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 12, color: "#7a6858", marginBottom: 5, fontFamily: "monospace", letterSpacing: "0.05em" }}>AI BACKEND</div>
-          <div style={{ display: "flex", gap: 4 }}>
-            {BACKEND_OPTIONS.map((b) => (
-              <button
-                key={b.id}
-                onClick={() => setSelectedBackend(b.id)}
-                style={{
-                  flex: 1, padding: "6px 4px", fontSize: 13, fontWeight: 600,
-                  border: selectedBackend === b.id ? `1px solid ${b.color}` : "1px solid #1a2a1a",
-                  backgroundColor: selectedBackend === b.id ? b.color + "20" : "transparent",
-                  color: selectedBackend === b.id ? b.color : "#6a5848",
-                  cursor: "pointer", fontFamily: "monospace",
-                }}
-              >{b.name}</button>
-            ))}
-          </div>
-        </div>
-
-        {/* Working directory picker */}
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 12, color: "#7a6858", marginBottom: 5, fontFamily: "monospace", letterSpacing: "0.05em" }}>WORKING DIRECTORY</div>
-          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-            <input
-              type="text"
-              value={workDir}
-              onChange={(e) => setWorkDir(e.target.value)}
-              placeholder="Paste path or click Browse"
-              style={{
-                flex: 1, padding: "6px 8px", fontSize: 12,
-                border: "1px solid #1a2a1a", backgroundColor: "#0a0e0a",
-                color: "#eddcb8", fontFamily: "monospace",
-                outline: "none",
-              }}
-            />
-            <button
-              onClick={() => {
-                const rid = nanoid(6);
-                folderPickCallbacks.set(rid, (p) => setWorkDir(p));
-                sendCommand({ type: "PICK_FOLDER", requestId: rid });
-              }}
-              style={{
-                padding: "6px 10px", border: "1px solid #1a2a1a",
-                backgroundColor: "#0a0e0a", color: "#9a8a68",
-                fontSize: 12, cursor: "pointer", fontFamily: "monospace",
-                whiteSpace: "nowrap",
-              }}
-            >Browse</button>
-          </div>
-          <div style={{ fontSize: 10, color: "#5a4a38", marginTop: 3, fontFamily: "monospace" }}>
-            Empty = default workspace
-          </div>
-        </div>
-
-        {/* Built-in agents */}
-        <div style={{ fontSize: 12, color: "#7a6858", marginBottom: 5, fontFamily: "monospace", letterSpacing: "0.05em" }}>BUILT-IN AGENTS</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 5, marginBottom: 10 }}>
-          {builtinAgents.map((def) => (
-            <button
-              key={def.id}
-              onClick={() => onHire(def, selectedBackend, workDir || undefined)}
-              onMouseEnter={(e) => { setHoveredId(def.id); e.currentTarget.style.borderColor = "#e8b04040"; }}
-              onMouseLeave={(e) => { setHoveredId(null); e.currentTarget.style.borderColor = "#1a2a1a"; }}
-              title={def.skills ? `Skills: ${def.skills}` : undefined}
-              style={{
-                display: "flex", flexDirection: "column", alignItems: "center",
-                padding: "12px 6px 10px", position: "relative",
-                border: "1px solid #1a2a1a", backgroundColor: "transparent",
-                cursor: "pointer", textAlign: "center",
-                transition: "border-color 0.15s",
-              }}
-            >
-              <SpriteAvatar palette={def.palette} zoom={2} ready={assetsReady} />
-              <div style={{ fontSize: 14, fontWeight: 700, color: "#eddcb8", marginTop: 6, width: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{def.name}</div>
-              <div style={{ fontSize: 12, color: "#7a6858", marginTop: 2, width: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{def.role}</div>
-              {hoveredId === def.id && (
-                <span
-                  onClick={(e) => { e.stopPropagation(); onEdit(def); }}
-                  style={{ position: "absolute", top: 4, right: 4, fontSize: 15, color: "#7a6858", cursor: "pointer", padding: "2px 4px" }}
-                  title="Edit"
-                >&#9998;</span>
-              )}
-            </button>
-          ))}
-        </div>
-
-        {/* Custom agents */}
-        {customAgents.length > 0 && (
-          <>
-            <div style={{ fontSize: 12, color: "#7a6858", marginBottom: 5, fontFamily: "monospace", letterSpacing: "0.05em" }}>MY AGENTS</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 5, marginBottom: 10 }}>
-              {customAgents.map((def) => (
-                <button
-                  key={def.id}
-                  onClick={() => onHire(def, selectedBackend, workDir || undefined)}
-                  onMouseEnter={(e) => { setHoveredId(def.id); e.currentTarget.style.borderColor = "#e8b04040"; }}
-                  onMouseLeave={(e) => { setHoveredId(null); e.currentTarget.style.borderColor = "#1a2a1a"; }}
-                  title={def.skills ? `Skills: ${def.skills}` : undefined}
-                  style={{
-                    display: "flex", flexDirection: "column", alignItems: "center",
-                    padding: "12px 6px 10px", position: "relative",
-                    border: "1px solid #1a2a1a", backgroundColor: "transparent",
-                    cursor: "pointer", textAlign: "center",
-                    transition: "border-color 0.15s",
-                  }}
-                >
-                  <SpriteAvatar palette={def.palette} zoom={2} ready={assetsReady} />
-                  <div style={{ fontSize: 14, fontWeight: 700, color: "#eddcb8", marginTop: 6, width: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{def.name}</div>
-                  <div style={{ fontSize: 12, color: "#7a6858", marginTop: 2, width: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{def.role}</div>
-                  {hoveredId === def.id && (
-                    <span style={{ position: "absolute", top: 4, right: 4, display: "flex", gap: 2, alignItems: "center" }}>
-                      <span
-                        onClick={(e) => { e.stopPropagation(); onEdit(def); }}
-                        style={{ fontSize: 15, color: "#7a6858", cursor: "pointer", padding: "2px 4px" }}
-                        title="Edit"
-                      >&#9998;</span>
-                      <span
-                        onClick={(e) => { e.stopPropagation(); onDelete(def.id); }}
-                        style={{ fontSize: 16, color: "#e04848", cursor: "pointer", padding: "2px 4px", fontWeight: 700 }}
-                        title="Delete"
-                      >&times;</span>
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
-          </>
-        )}
-
-        <div style={{ display: "flex", gap: 6 }}>
-          <button
-            onClick={onCreate}
-            style={{
-              flex: 1, padding: "9px",
-              border: "1px solid #e8b04060", backgroundColor: "transparent",
-              color: "#e8b040", fontSize: 14, cursor: "pointer", fontFamily: "monospace",
-            }}
-          >+ Create New</button>
-          <button
-            onClick={onClose}
-            style={{
-              padding: "9px 16px",
-              border: "1px solid #1a2a1a", backgroundColor: "transparent",
-              color: "#6a5848", fontSize: 14, cursor: "pointer", fontFamily: "monospace",
-            }}
-          >Cancel</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ExpandableText({ text, maxChars = 300, maxHeight = 120 }: { text: string; maxChars?: number; maxHeight?: number }) {
+function ExpandableText({ text, maxChars = 200, maxHeight = 100 }: { text: string; maxChars?: number; maxHeight?: number }) {
   const [expanded, setExpanded] = useState(false);
   const isLong = text.length > maxChars;
+  const displayText = (isLong && !expanded) ? text.slice(0, maxChars) + "..." : text;
+
   return (
-    <>
-      <div style={{
-        fontSize: 12, color: "#b09878", wordBreak: "break-word",
-        maxHeight: expanded ? "none" : maxHeight, overflow: "hidden", fontFamily: "monospace",
-      }}>
-        {expanded ? text : text.slice(0, maxChars)}{!expanded && isLong ? "..." : ""}
-      </div>
+    <div style={{ fontSize: 13, lineHeight: 1.5, color: "#eddcb8", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+      {displayText}
       {isLong && (
-        <div
-          style={{ fontSize: 10, color: "#6a8aaa", cursor: "pointer", marginTop: 2, fontFamily: "monospace" }}
-          onClick={() => setExpanded(!expanded)}
+        <button 
+          onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+          style={{ 
+            background: "none", border: "none", color: "#3b82f6", cursor: "pointer", 
+            padding: "0 4px", fontSize: 11, fontStyle: "italic", verticalAlign: "middle"
+          }}
         >
-          {expanded ? "▲ Collapse" : "▼ Show more"}
-        </div>
+          {expanded ? "show less" : "show more"}
+        </button>
       )}
-    </>
+    </div>
   );
 }
 
-const TEAM_MSG_COLORS: Record<string, { bg: string; border: string; label: string }> = {
-  delegation: { bg: "#182844", border: "#5aacff", label: "Delegated" },
-  result: { bg: "#143822", border: "#48cc6a", label: "Result" },
-  status: { bg: "#261a00", border: "#e8b040", label: "Status" },
-};
 
 function TeamChatView({ messages, agents, assetsReady }: {
   messages: TeamChatMessage[];
@@ -2174,6 +1645,9 @@ function HireTeamModal({ agentDefs, onCreateTeam, onClose, assetsReady }: {
   const [backends, setBackends] = useState<Record<string, string>>({});
   const [workDir, setWorkDir] = useState<string>("");
 
+  const storeBackends = useOfficeStore((state) => state.backendOptions);
+  const availableBackends = storeBackends.length > 0 ? storeBackends : DEFAULT_BACKEND_OPTIONS;
+
   const handleCreate = () => {
     if (!leader) return;
     const memberIds: string[] = [];
@@ -2223,18 +1697,25 @@ function HireTeamModal({ agentDefs, onCreateTeam, onClose, assetsReady }: {
               }}
             />
             <button
+              className="btn-browse"
+              style={{
+                display: "flex", alignItems: "center", gap: 6,
+                padding: "6px 12px", fontSize: 13, fontWeight: 700,
+                border: "1px solid #e8b04060", backgroundColor: "#382800",
+                color: "#e8b040", cursor: "pointer", fontFamily: "monospace",
+                transition: "all 0.2s ease", boxShadow: "2px 2px 0px rgba(0,0,0,0.3)",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#4a3a00"; e.currentTarget.style.transform = "translate(-1px, -1px)"; e.currentTarget.style.boxShadow = "3px 3px 0px rgba(0,0,0,0.4)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#382800"; e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "2px 2px 0px rgba(0,0,0,0.3)"; }}
               onClick={() => {
                 const rid = nanoid(6);
                 folderPickCallbacks.set(rid, (p) => setWorkDir(p));
                 sendCommand({ type: "PICK_FOLDER", requestId: rid });
               }}
-              style={{
-                padding: "6px 10px", border: "1px solid #1a2a1a",
-                backgroundColor: "#0a0e0a", color: "#9a8a68",
-                fontSize: 12, cursor: "pointer", fontFamily: "monospace",
-                whiteSpace: "nowrap",
-              }}
-            >Browse</button>
+            >
+              <span style={{ fontSize: 16 }}>📁</span>
+              <span>Browse</span>
+            </button>
           </div>
           <div style={{ fontSize: 10, color: "#5a4a38", marginTop: 3, fontFamily: "monospace" }}>
             Empty = default workspace
@@ -2271,7 +1752,7 @@ function HireTeamModal({ agentDefs, onCreateTeam, onClose, assetsReady }: {
                   backgroundColor: "#0a0e0a", color: "#9a8a68", fontSize: 12, cursor: "pointer", fontFamily: "monospace",
                 }}
               >
-                {BACKEND_OPTIONS.map((b) => (
+                {availableBackends.map((b) => (
                   <option key={b.id} value={b.id}>{b.name}</option>
                 ))}
               </select>
@@ -2310,7 +1791,7 @@ function HireTeamModal({ agentDefs, onCreateTeam, onClose, assetsReady }: {
                       backgroundColor: "#0a0e0a", color: "#9a8a68", fontSize: 12, cursor: "pointer", fontFamily: "monospace",
                     }}
                   >
-                    {BACKEND_OPTIONS.map((b) => (
+                    {availableBackends.map((b) => (
                       <option key={b.id} value={b.id}>{b.name}</option>
                     ))}
                   </select>
@@ -2435,65 +1916,72 @@ const agentWorkDirMap = new Map<string, string>();
 
 export default function OfficePage() {
   const router = useRouter();
-  const { agents, connected, addUserMessage, teamMessages, clearTeamMessages, teamPhases, agentDefs, role, suggestions, setRole } = useOfficeStore();
-  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [previewRatings, setPreviewRatings] = useState<Ratings>({});
-  const [previewRated, setPreviewRated] = useState(false);
-  const [celebration, setCelebration] = useState<{ previewUrl?: string; previewPath?: string; previewCmd?: string; previewPort?: number; projectDir?: string; entryFile?: string } | null>(null);
-  const [showConfetti, setShowConfetti] = useState(false);
-  const { confirm, modal: confirmModal } = useConfirm();
-  const [showHireModal, setShowHireModal] = useState(false);
-  const [showHireTeamModal, setShowHireTeamModal] = useState(false);
-  const [showCreateAgent, setShowCreateAgent] = useState(false);
-  const [editingAgent, setEditingAgent] = useState<AgentDefinition | null>(null);
-  const [chatOpen, setChatOpen] = useState(false);
-  const [mobileTeamOpen, setMobileTeamOpen] = useState(false);
-  const [expandedSection, setExpandedSection] = useState<"team" | "agents" | "external">("agents");
-  const [prompt, setPrompt] = useState("");
-  const [pendingImages, setPendingImages] = useState<{ name: string; dataUrl: string; base64: string }[]>([]);
-  const pasteMapRef = useRef(new Map<string, string>()); // label → full text
-  const pasteCountRef = useRef(0);
-  const chatEndRef = useRef<HTMLDivElement>(null);
-  // Editor state
-  const [editMode, setEditMode] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [showHistory, setShowHistory] = useState(false);
-  const [showOfficeSwitcher, setShowOfficeSwitcher] = useState(false);
-  const [currentOfficeId, setCurrentOfficeId] = useState<string | null>(null);
-  const [showEditorControls, setShowEditorControls] = useState(false);
-  const [testActive, setTestActive] = useState(false);
-  const [demoRunning, setDemoRunning] = useState(false);
-  const [showDemoButton, setShowDemoButton] = useState(false);
-  const showTestButton = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('test');
-  useEffect(() => {
-    setShowDemoButton(new URLSearchParams(window.location.search).has('demo'));
-  }, []);
-  const [mapAspect, setMapAspect] = useState(1); // cols/rows ratio for scene width
-  const [soundEnabled, setSoundEnabled] = useState(true);
-  const [, forceUpdate] = useState(0);
-  const editorRef = useRef(new EditorState());
-  const officeStateRef = useRef<OfficeState | null>(null);
-  const [sceneAdapter, setSceneAdapter] = useState<SceneAdapter | null>(null);
-  const zoomRef = useRef(1);
-  const panRef = useRef({ x: 0, y: 0 });
-  const [assetsReady, setAssetsReady] = useState(false);
+  const agents = useOfficeStore(s => s.agents);
+  const connected = useOfficeStore(s => s.connected);
+  const addUserMessage = useOfficeStore(s => s.addUserMessage);
+  const teamMessages = useOfficeStore(s => s.teamMessages);
+  const clearTeamMessages = useOfficeStore(s => s.clearTeamMessages);
+  const teamPhases = useOfficeStore(s => s.teamPhases);
+  const agentDefs = useOfficeStore(s => s.agentDefs);
+  const role = useOfficeStore(s => s.role);
+  const suggestions = useOfficeStore(s => s.suggestions);
+  const setRole = useOfficeStore(s => s.setRole);
+  const backendOptions = useOfficeStore(s => s.backendOptions);
+  const {
+    mounted,
+    showThoughtStream, setShowThoughtStream, toggleThoughtStream,
+    showHealthDashboard, setShowHealthDashboard, toggleHealthDashboard,
+    showSettings, setShowSettings, toggleSettings,
+    showHistory, setShowHistory, toggleHistory,
+    showOfficeSwitcher, setShowOfficeSwitcher, toggleOfficeSwitcher,
+    showEditorControls, setShowEditorControls,
+    showDemoButton, showTestButton,
+    showShareMenu, setShowShareMenu,
+    showHireModal, setShowHireModal,
+    showHireTeamModal, setShowHireTeamModal,
+    showCreateAgent, setShowCreateAgent,
+    chatOpen, setChatOpen,
+    mobileTeamOpen, setMobileTeamOpen,
+    showConfetti, setShowConfetti,
+    previewUrl, setPreviewUrl,
+    previewRatings, setPreviewRatings,
+    previewRated, setPreviewRated,
+    celebration, setCelebration,
+    showKnowledge, setShowKnowledge, toggleKnowledge,
+    testActive, setTestActive,
+    demoRunning, setDemoRunning,
+    isMobile,
+    voiceEnabled, setVoiceEnabled, toggleVoice,
+    editMode, setEditMode, toggleEditMode,
+    consoleMode, setConsoleMode, toggleConsoleMode,
+    sceneVisible, setSceneVisible,
+    expandedSection, setExpandedSection,
+    prompt, setPrompt,
+    selectedAgent, setSelectedAgent,
+    editingAgent, setEditingAgent,
+    assetsReady, setAssetsReady,
+    mapAspect, setMapAspect,
+    soundEnabled, setSoundEnabled,
+    termTheme, setTermTheme,
+    forceUpdate,
+    sceneAdapter, setSceneAdapter,
+    currentOfficeId, setCurrentOfficeId,
+    pendingImages, setPendingImages,
+    // Refs
+    editorRef,
+    officeStateRef,
+    zoomRef,
+    panRef,
+    pasteMapRef,
+    pasteCountRef,
+    chatEndRef
+  } = useOfficeUI();
 
-  // ── Theme ──
-  // Always start with default to avoid SSR/client hydration mismatch,
-  // then restore saved theme in useEffect (client-only).
-  const [termTheme, setTermTheme] = useState("green-hacker");
-  applyTermTheme(termTheme);
-  useEffect(() => {
-    const saved = localStorage.getItem("bit-office-theme");
-    if (saved && saved !== "green-hacker" && TERM_THEMES[saved]) {
-      setTermTheme(saved);
-    }
-  }, []);
-  useEffect(() => {
-    applyTermTheme(termTheme);
-    localStorage.setItem("bit-office-theme", termTheme);
-  }, [termTheme]);
+  const { confirm, modal: confirmModal } = useConfirm();
+
+  const availableBackends = backendOptions.length > 0 
+    ? backendOptions.map(b => ({ ...b, color: b.color || "#6366f1" }))
+    : DEFAULT_BACKEND_OPTIONS;
 
   // Bridge store → scene adapter
   useSceneBridge(sceneAdapter, selectedAgent);
@@ -2501,19 +1989,12 @@ export default function OfficePage() {
   // Gateway may override preview URL (e.g. auto-detected Vite dev server)
   const pendingPreviewUrl = useOfficeStore(s => s.pendingPreviewUrl);
   useEffect(() => {
-    if (pendingPreviewUrl && previewUrl) {
+    if (pendingPreviewUrl && pendingPreviewUrl !== previewUrl) {
       setPreviewUrl(pendingPreviewUrl);
       useOfficeStore.getState().consumePreviewUrl();
     }
-  }, [pendingPreviewUrl, previewUrl]);
+  }, [pendingPreviewUrl]);
 
-  // Load sound preference
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem('office-sound-enabled');
-      if (stored !== null) setSoundEnabled(JSON.parse(stored));
-    } catch { /* ignore */ }
-  }, []);
 
   // Celebrate task completion:
   // - Solo agent (no teamId, not leader): status === "done"
@@ -2556,7 +2037,7 @@ export default function OfficePage() {
   }, [hydrated, agents]);
 
   const onLayoutChange = useCallback(() => {
-    forceUpdate((n) => n + 1);
+    forceUpdate();
   }, []);
 
   const {
@@ -2596,7 +2077,7 @@ export default function OfficePage() {
     requestAnimationFrame(() => requestAnimationFrame(() => fitZoomToLayout(layout)));
   }, [officeStateRef, handleImportLayout, fitZoomToLayout]);
 
-  const toggleEditMode = useCallback(() => {
+  const handleToggleEditMode = useCallback(() => {
     setEditMode((prev) => {
       const next = !prev;
       if (!next) {
@@ -2613,7 +2094,7 @@ export default function OfficePage() {
     onRedo: handleRedo,
     onDeleteSelected: handleDeleteSelected,
     onRotateSelected: handleRotateSelected,
-    onExitEditMode: toggleEditMode,
+    onExitEditMode: handleToggleEditMode,
   });
 
   // Load office zip on mount (always from /offices/)
@@ -2642,19 +2123,19 @@ export default function OfficePage() {
     setSceneAdapter(adapter);
   }, []);
 
-  useEffect(() => {
-    const conn = getConnection();
-    if (!conn || !conn.sessionToken) {
-      if (conn && !conn.sessionToken) {
-        const { clearConnection } = require("@/lib/storage");
-        clearConnection();
-      }
-      router.push("/pair");
-      return;
+  const handleLogout = useCallback(async () => {
+    try {
+      const { clearConnection } = await import("@/lib/storage");
+      clearConnection();
+      router.replace("/");
+    } catch (err) {
+      console.error("Logout error:", err);
     }
+  }, [router]);
 
+  useEffect(() => {
     // Re-detect gateway port instead of using stale stored wsUrl
-    const detectAndConnect = async () => {
+    const detectAndConnect = async (conn: any) => {
       setRole(conn.role ?? "owner");
       useOfficeStore.getState().hydrate();
 
@@ -2664,8 +2145,8 @@ export default function OfficePage() {
       }
 
       // For ws mode: detect live gateway port
-      const isDev = window.location.port === "3000" || window.location.port === "3002";
-      const ports = isDev ? [9099, 9090, 9091] : [9090, 9091, 9099];
+      const isDev = window.location.port === "3000" || window.location.port === "3002" || window.location.port === "3005";
+      const ports = isDev ? [9100, 9105, 9099, 9090, 9091] : [9090, 9091, 9100, 9105, 9099];
 
       // Try same-origin first (production bundled mode)
       if (!isDev) {
@@ -2681,13 +2162,14 @@ export default function OfficePage() {
         } catch { /* not bundled mode */ }
       }
 
-      // Scan preferred ports
+      // Scan preferred ports using dynamic hostname
+      const scanHost = window.location.hostname || "localhost";
       for (const port of ports) {
         try {
-          const res = await fetch(`http://localhost:${port}/connect`, { signal: AbortSignal.timeout(1000) });
+          const res = await fetch(`http://${scanHost}:${port}/connect`, { signal: AbortSignal.timeout(1000) });
           if (!res.ok) continue;
           const data = await res.json();
-          const freshConn = { ...conn, wsUrl: `ws://localhost:${port}`, sessionToken: data.sessionToken };
+          const freshConn = { ...conn, wsUrl: `ws://${scanHost}:${port}`, sessionToken: data.sessionToken };
           const { saveConnection } = await import("@/lib/storage");
           saveConnection(freshConn);
           return connect(freshConn);
@@ -2698,9 +2180,31 @@ export default function OfficePage() {
       return connect(conn);
     };
 
+    const checkAuth = async () => {
+      // Cloud mode (GitHub Pages): skip gateway connection entirely
+      if (isCloudMode()) {
+        setRole("owner");
+        useOfficeStore.getState().hydrate();
+        // Mark as connected in cloud mode so UI doesn't show OFFLINE
+        useOfficeStore.setState({ connected: true });
+        return;
+      }
+
+      const conn = getConnection();
+      if (!conn || !conn.sessionToken) {
+        if (conn && !conn.sessionToken) {
+          const { clearConnection } = await import("@/lib/storage");
+          clearConnection();
+        }
+        router.push("/pair");
+        return;
+      }
+      return detectAndConnect(conn);
+    };
+
     let scopedDisconnect: (() => void) | undefined;
-    detectAndConnect().then((d) => { scopedDisconnect = d; });
-    return () => { scopedDisconnect?.(); };
+    checkAuth().then(d => { if (typeof d === 'function') scopedDisconnect = d; });
+    return () => { if (scopedDisconnect) scopedDisconnect(); };
   }, [router, setRole]);
 
   const selectedAgentState = selectedAgent ? agents.get(selectedAgent) : null;
@@ -2895,8 +2399,18 @@ export default function OfficePage() {
     }
   }, [addImageFromFile]);
 
-  const handleRunTask = useCallback(async () => {
-    if (!selectedAgent || (!prompt.trim() && pendingImages.length === 0)) return;
+  const handleRunTask = useCallback(async (explicitPrompt?: string) => {
+    const targetPrompt = explicitPrompt !== undefined ? explicitPrompt : prompt;
+    if (!targetPrompt.trim() && pendingImages.length === 0) return;
+
+    // If no agent selected, this is a "Dynamic Swarm Assembly" request
+    if (!selectedAgent) {
+      const promptText = targetPrompt.trim();
+      sendCommand({ type: "ASSEMBLE_SWARM", prompt: promptText });
+      setPrompt("");
+      return;
+    }
+
     const agent = agents.get(selectedAgent);
     const canSendToExternal = selectedAgent === "openclaw:main";
     if (agent?.isExternal && !canSendToExternal) return;
@@ -2918,7 +2432,7 @@ export default function OfficePage() {
     }
 
     // Expand pasted text labels back to full content
-    let finalPrompt = prompt.trim();
+    let finalPrompt = targetPrompt.trim();
     for (const [label, fullText] of pasteMapRef.current) {
       finalPrompt = finalPrompt.replace(label, fullText);
     }
@@ -2950,6 +2464,15 @@ export default function OfficePage() {
     if (!selectedAgent) return;
     sendCommand({ type: "CANCEL_TASK", agentId: selectedAgent, taskId: "" });
   }, [selectedAgent]);
+
+  const handleVoiceCommand = useCallback((cmd: string, args?: any) => {
+    if (cmd === "RUN_TASK" || cmd === "ASSEMBLE_SWARM") {
+      const text = args?.prompt;
+      if (text) {
+        handleRunTask(text);
+      }
+    }
+  }, [handleRunTask]);
 
   // Get the current team phase for the selected agent (if it's a team lead)
   const getAgentPhase = useCallback((agentId: string): string | null => {
@@ -2990,24 +2513,15 @@ export default function OfficePage() {
   // Zoom controls
   const handleZoomChange = useCallback((newZoom: number) => {
     zoomRef.current = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newZoom));
-    forceUpdate((n) => n + 1);
+    forceUpdate();
   }, []);
 
   const agentList = Array.from(agents.values());
-  const teamAgents = agentList.filter((a) => !!a.teamId);
+  const teamAgents = agentList.filter((a) => !!a.teamId && !a.name.toLowerCase().includes('vera') && !a.role.toLowerCase().includes('verificator'));
   const soloAgents = agentList.filter((a) => !a.teamId && !a.isExternal);
   const externalAgents = agentList.filter((a) => !!a.isExternal && !a.teamId);
   const editor = editorRef.current;
 
-  // Responsive: detect mobile
-  const [isMobile, setIsMobile] = useState(false);
-  useEffect(() => {
-    const mq = window.matchMedia("(max-width: 768px)");
-    setIsMobile(mq.matches);
-    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
-    mq.addEventListener("change", handler);
-    return () => mq.removeEventListener("change", handler);
-  }, []);
 
   const isOwner = role === "owner";
   const isCollaborator = role === "collaborator";
@@ -3021,13 +2535,9 @@ export default function OfficePage() {
     setSuggestText("");
   }, [suggestText]);
 
-  const [showShareMenu, setShowShareMenu] = useState(false);
-  const [consoleMode, setConsoleMode] = useState(false);
-  const [sceneVisible, setSceneVisible] = useState(true); // delays scene mount until collapse animation ends
 
   const handleCreateShareLink = useCallback(async (shareRole: "collaborator" | "spectator") => {
     try {
-      const { getGatewayHttpUrl } = await import("@/lib/storage");
       const baseUrl = getGatewayHttpUrl();
       // Share creation uses the pair code. We prompt the user to enter it.
       const code = window.prompt("Enter your pair code to create a share link:");
@@ -3053,6 +2563,7 @@ export default function OfficePage() {
   }, []);
 
   const isChatExpanded = chatOpen && selectedAgent !== null;
+  if (!mounted) return null;
 
   return (
     <div style={{ height: "100vh", width: "100vw", position: "relative", overflow: "hidden", display: "flex" }}>
@@ -3099,12 +2610,12 @@ export default function OfficePage() {
             <h1 className="px-font" style={{ fontSize: 12, margin: 0, color: "#e8b040", textShadow: "2px 2px 0px rgba(0,0,0,0.8), 0 0 12px rgba(200,155,48,0.3)", letterSpacing: "0.05em" }}>Bit Office</h1>
             <span style={{
               fontSize: 10, padding: "3px 7px",
-              border: `1px solid ${connected ? "#2a5c2a" : "#5c1a1a"}`,
-              backgroundColor: connected ? "#143a14" : "#3e1818",
-              color: connected ? "#48cc6a" : "#e04848",
+              border: `1px solid ${connected ? "#2a5c2a" : process.env.NEXT_PUBLIC_CLOUD_MODE === "true" ? "#1a3a6a" : "#5c1a1a"}`,
+              backgroundColor: connected ? "#143a14" : process.env.NEXT_PUBLIC_CLOUD_MODE === "true" ? "#0d1e3a" : "#3e1818",
+              color: connected ? "#48cc6a" : process.env.NEXT_PUBLIC_CLOUD_MODE === "true" ? "#5aacff" : "#e04848",
               fontFamily: "monospace", letterSpacing: "0.05em",
             }}>
-              {connected ? "● ONLINE" : "● OFFLINE"}
+              {connected ? "● ONLINE" : process.env.NEXT_PUBLIC_CLOUD_MODE === "true" ? "☁ CLOUD" : "● OFFLINE"}
             </span>
             {editMode && (
               <span style={{
@@ -3201,24 +2712,40 @@ export default function OfficePage() {
             onToolChange={(tool) => {
               editor.activeTool = tool as typeof editor.activeTool;
               editor.clearSelection();
-              forceUpdate((n) => n + 1);
+              forceUpdate();
             }}
-            onTileTypeChange={(type) => { editor.selectedTileType = type; forceUpdate((n) => n + 1); }}
-            onFloorColorChange={(color) => { editor.floorColor = color; forceUpdate((n) => n + 1); }}
-            onWallColorChange={(color) => { editor.wallColor = color; forceUpdate((n) => n + 1); }}
+            onTileTypeChange={(type) => { editor.selectedTileType = type; forceUpdate(); }}
+            onFloorColorChange={(color) => { editor.floorColor = color; forceUpdate(); }}
+            onWallColorChange={(color) => { editor.wallColor = color; forceUpdate(); }}
             onSelectedFurnitureColorChange={handleSelectedFurnitureColorChange}
-            onFurnitureTypeChange={(type) => { editor.selectedFurnitureType = type; editor.activeTool = EditTool.FURNITURE_PLACE; forceUpdate((n) => n + 1); }}
+            onFurnitureTypeChange={(type) => { editor.selectedFurnitureType = type; editor.activeTool = EditTool.FURNITURE_PLACE; forceUpdate(); }}
           />
         )}
 
         {/* Bottom Toolbar (desktop only) */}
         {!isMobile && (
+          <>
+          {/* UI State Debug Overlay */}
+          <div style={{ position: "fixed", top: 10, left: 10, zIndex: 99999, pointerEvents: "none", display: "flex", flexDirection: "column", gap: 5 }}>
+            <div style={{ fontSize: 10, fontWeight: "bold", color: showHealthDashboard ? "#00ff00" : "#ff0000", fontFamily: "monospace", background: "rgba(0,0,0,0.8)", padding: "4px 8px", borderRadius: 4, border: "1px solid #333" }}>
+              DEBUG HEALTH: {showHealthDashboard ? "ACTIVE" : "OFF"}
+            </div>
+            <div style={{ fontSize: 10, fontWeight: "bold", color: showThoughtStream ? "#00ffff" : "#ff0000", fontFamily: "monospace", background: "rgba(0,0,0,0.8)", padding: "4px 8px", borderRadius: 4, border: "1px solid #333" }}>
+              DEBUG COGNITION: {showThoughtStream ? "ACTIVE" : "OFF"}
+            </div>
+          </div>
+
           <BottomToolbar
             editMode={editMode}
             onToggleEditMode={toggleEditMode}
             onOpenSettings={() => setShowSettings(true)}
             onOpenHistory={() => setShowHistory(true)}
             onOpenOfficeSwitcher={() => setShowOfficeSwitcher(true)}
+            onOpenKnowledge={() => setShowKnowledge(true)}
+            onOpenThoughtStream={toggleThoughtStream}
+            onToggleHealth={toggleHealthDashboard}
+            onToggleJarvis={() => setVoiceEnabled(!voiceEnabled)}
+            jarvisActive={voiceEnabled}
             showEditorControls={showEditorControls}
             testActive={testActive}
             onToggleTest={showTestButton ? () => {
@@ -3233,12 +2760,31 @@ export default function OfficePage() {
               }
             } : undefined}
           />
-        )}
-
+        </>
+      )}
         {/* Team activity toast notifications */}
         {teamMessages.length > 0 && (
-          <TeamActivityToast messages={teamMessages} agents={agents} assetsReady={assetsReady} />
+          <TeamActivityToast 
+            messages={teamMessages.filter(m => {
+              const agent = agents.get(m.fromAgentId);
+              if (!agent) return true;
+              return !agent.name.toLowerCase().includes('vera') && 
+                     !agent.role.toLowerCase().includes('verificator');
+            })} 
+            agents={agents} 
+            assetsReady={assetsReady} 
+          />
         )}
+        {/* Global Jarvis Listener */}
+        <div style={{ position: "fixed", bottom: 80, right: 20, zIndex: 100, pointerEvents: "none" }}>
+          <div style={{ pointerEvents: "auto" }}>
+            <VoiceInputButton 
+              textValue={prompt}
+              onText={setPrompt}
+              onCommand={handleVoiceCommand}
+            />
+          </div>
+        </div>
 
         </div>
       </div>}
@@ -3416,7 +2962,7 @@ export default function OfficePage() {
                   >
                     <span style={{ color: "#c8a050", fontWeight: 600, flexShrink: 0, fontSize: 12 }}>
                       {agent.role?.split("—")[0]?.trim()}
-                      {agent.backend && <span style={{ color: "#8a7040", fontSize: 11 }}> ({BACKEND_OPTIONS.find((b) => b.id === agent.backend)?.name ?? agent.backend})</span>}
+                      {agent.backend && <span style={{ color: "#8a7040", fontSize: 11 }}> ({availableBackends.find((b) => b.id === agent.backend)?.name || agent.backend})</span>}
                     </span>
                     {(agentState?.cwd || agentState?.workDir) && (
                       <span className="term-path-scroll" style={{ fontSize: 11, color: "#7a6848", flexShrink: 1, minWidth: 0 }} title={agentState.cwd ?? agentState.workDir}>
@@ -3708,6 +3254,7 @@ export default function OfficePage() {
                                     backgroundColor: "#16122a", color: "#c084fc", fontSize: 14, outline: "none",
                                   }}
                                 />
+                                <VoiceInputButton textValue={suggestText} onText={setSuggestText} onCommand={handleVoiceCommand} />
                                 <button
                                   onClick={handleSuggest}
                                   disabled={!suggestText.trim()}
@@ -3760,7 +3307,8 @@ export default function OfficePage() {
                                       fontFamily: TERM_FONT, fontWeight: 400, caretColor: TERM_GREEN,
                                     }}
                                   />
-                                                                  </div>
+                                  <VoiceInputButton variant="terminal" textValue={prompt} onText={setPrompt} onCommand={handleVoiceCommand} />
+                                </div>
                                 {!busy && (
                                   <span
                                     onClick={async () => { if (await confirm("End project?")) handleEndProject(); }}
@@ -3787,13 +3335,14 @@ export default function OfficePage() {
                                   onChange={(e) => setPrompt(e.target.value)}
                                   onKeyDown={(e) => isRealEnter(e) && handleRunTask()}
                                   placeholder="or give feedback..."
-                                  style={{
-                                    flex: 1, padding: "5px 6px", border: "none",
-                                    backgroundColor: "transparent", color: TERM_TEXT_BRIGHT, fontSize: TERM_SIZE, outline: "none",
-                                    fontFamily: TERM_FONT, caretColor: TERM_GREEN,
-                                  }}
-                                />
-                              </div>
+                                    style={{
+                                      flex: 1, padding: "5px 6px", border: "none",
+                                      backgroundColor: "transparent", color: TERM_TEXT_BRIGHT, fontSize: TERM_SIZE, outline: "none",
+                                      fontFamily: TERM_FONT, caretColor: TERM_GREEN,
+                                    }}
+                                  />
+                                  <VoiceInputButton variant="terminal" textValue={prompt} onText={setPrompt} onCommand={handleVoiceCommand} />
+                                </div>
                             ) : cardPhase === "complete" && !busy ? (
                               <div style={{ display: "flex", gap: 6, alignItems: "center", borderTop: "none", padding: "4px 8px" }}>
                                 <span style={{ color: TERM_DIM, fontSize: TERM_SIZE, fontFamily: TERM_FONT }}>&gt;</span>
@@ -3804,13 +3353,14 @@ export default function OfficePage() {
                                   onChange={(e) => setPrompt(e.target.value)}
                                   onKeyDown={(e) => isRealEnter(e) && handleRunTask()}
                                   placeholder="request changes..."
-                                  style={{
-                                    flex: 1, padding: "5px 6px", border: "none",
-                                    backgroundColor: "transparent", color: TERM_TEXT_BRIGHT, fontSize: TERM_SIZE, outline: "none",
-                                    fontFamily: TERM_FONT, caretColor: TERM_GREEN,
-                                  }}
-                                />
-                                <button
+                                   style={{
+                                     flex: 1, padding: "5px 6px", border: "none",
+                                     backgroundColor: "transparent", color: TERM_TEXT_BRIGHT, fontSize: TERM_SIZE, outline: "none",
+                                     fontFamily: TERM_FONT, caretColor: TERM_GREEN,
+                                   }}
+                                 />
+                                 <VoiceInputButton variant="terminal" textValue={prompt} onText={setPrompt} onCommand={handleVoiceCommand} />
+                                 <button
                                   onClick={async () => { if (await confirm("End project?")) handleEndProject(); }}
                                   style={{
                                     padding: "5px 14px", border: "1px solid #e8903040",
@@ -3832,14 +3382,15 @@ export default function OfficePage() {
                                     if (isRealEnter(e)) handleRunTask();
                                   }}
                                   placeholder={isAgentBusy ? "esc stop · type to continue" : ""}
-                                  style={{
-                                    flex: 1, padding: "6px 5px", border: "none",
-                                    backgroundColor: "transparent", color: TERM_TEXT_BRIGHT, fontSize: TERM_SIZE, outline: "none",
-                                    fontFamily: TERM_FONT, fontWeight: 400, caretColor: TERM_GREEN,
-                                  }}
-                                  autoFocus
-                                />
-                                                              </div>
+                                   style={{
+                                     flex: 1, padding: "6px 5px", border: "none",
+                                     backgroundColor: "transparent", color: TERM_TEXT_BRIGHT, fontSize: TERM_SIZE, outline: "none",
+                                     fontFamily: TERM_FONT, fontWeight: 400, caretColor: TERM_GREEN,
+                                   }}
+                                   autoFocus
+                                 />
+                                 <VoiceInputButton variant="terminal" textValue={prompt} onText={setPrompt} onCommand={handleVoiceCommand} />
+                               </div>
                             )}
                           </div>
                         );
@@ -4006,6 +3557,7 @@ export default function OfficePage() {
                     messages: state?.messages,
                     pendingApproval: state?.pendingApproval,
                     isTeamLead: agent.isTeamLead,
+                    isFailover: state?.isFailover,
                   };
                 })}
                 selectedAgent={selectedAgent}
@@ -4024,9 +3576,17 @@ export default function OfficePage() {
             )}
 
             {/* Team Activity log */}
-            {expandedSection === "team" && teamMessages.length > 0 && (
-              <TeamActivityLog messages={teamMessages} agents={agents} assetsReady={assetsReady} onClear={clearTeamMessages} />
-            )}
+            {expandedSection === "team" && teamMessages.length > 0 && (() => {
+              const filteredMessages = teamMessages.filter(m => {
+                const agent = agents.get(m.fromAgentId);
+                if (!agent) return true;
+                return !agent.name.toLowerCase().includes('vera') && 
+                       !agent.role.toLowerCase().includes('verificator');
+              });
+              return filteredMessages.length > 0 ? (
+                <TeamActivityLog messages={filteredMessages} agents={agents} assetsReady={assetsReady} onClear={clearTeamMessages} />
+              ) : null;
+            })()}
 
             </>);
           })()}
@@ -4268,6 +3828,7 @@ export default function OfficePage() {
                           backgroundColor: "#16122a", color: "#c084fc", fontSize: 14, outline: "none",
                         }}
                       />
+                      <VoiceInputButton textValue={suggestText} onText={setSuggestText} onCommand={handleVoiceCommand} />
                       <button
                         onClick={handleSuggest}
                         disabled={!suggestText.trim()}
@@ -4317,8 +3878,22 @@ export default function OfficePage() {
                             backgroundColor: "#16122a", color: "#eddcb8", fontSize: 14, outline: "none",
                           }}
                         />
+                        <VoiceInputButton 
+  textValue={prompt} 
+  onText={setPrompt} 
+  onCommand={(cmd, args) => {
+    if (cmd === "ASSEMBLE_SWARM") {
+      sendCommand({ type: "ASSEMBLE_SWARM", prompt: args.prompt });
+    } else if (cmd === "RUN_TASK") {
+      // Just set prompt and let handleRunTask handle the rest
+      setPrompt(args.prompt);
+      // We need a slight delay to ensure setPrompt has applied
+      setTimeout(() => handleRunTask(), 100);
+    }
+  }}
+/>
                         <button
-                          onClick={handleRunTask}
+                          onClick={() => handleRunTask()}
                           disabled={!prompt.trim() && pendingImages.length === 0}
                           style={{
                             padding: "9px 14px", border: "none",
@@ -4360,8 +3935,20 @@ export default function OfficePage() {
                             backgroundColor: "#16122a", color: "#eddcb8", fontSize: 14, outline: "none",
                           }}
                         />
+                        <VoiceInputButton 
+  textValue={prompt} 
+  onText={setPrompt} 
+  onCommand={(cmd, args) => {
+    if (cmd === "ASSEMBLE_SWARM") {
+      sendCommand({ type: "ASSEMBLE_SWARM", prompt: args.prompt });
+    } else if (cmd === "RUN_TASK") {
+      setPrompt(args.prompt);
+      setTimeout(() => handleRunTask(), 100);
+    }
+  }}
+/>
                         <button
-                          onClick={handleRunTask}
+                          onClick={() => handleRunTask()}
                           disabled={!prompt.trim() && pendingImages.length === 0}
                           style={{
                             padding: "9px 14px", border: "none",
@@ -4387,8 +3974,20 @@ export default function OfficePage() {
                             backgroundColor: "#16122a", color: "#eddcb8", fontSize: 14, outline: "none",
                           }}
                         />
+                        <VoiceInputButton 
+  textValue={prompt} 
+  onText={setPrompt} 
+  onCommand={(cmd, args) => {
+    if (cmd === "ASSEMBLE_SWARM") {
+      sendCommand({ type: "ASSEMBLE_SWARM", prompt: args.prompt });
+    } else if (cmd === "RUN_TASK") {
+      setPrompt(args.prompt);
+      setTimeout(() => handleRunTask(), 100);
+    }
+  }}
+/>
                         <button
-                          onClick={handleRunTask}
+                          onClick={() => handleRunTask()}
                           disabled={!prompt.trim() && pendingImages.length === 0}
                           style={{
                             padding: "9px 14px", border: "none",
@@ -4430,8 +4029,20 @@ export default function OfficePage() {
                         }}
                         autoFocus
                       />
+                      <VoiceInputButton 
+  textValue={prompt} 
+  onText={setPrompt} 
+  onCommand={(cmd, args) => {
+    if (cmd === "ASSEMBLE_SWARM") {
+      sendCommand({ type: "ASSEMBLE_SWARM", prompt: args.prompt });
+    } else if (cmd === "RUN_TASK") {
+      setPrompt(args.prompt);
+      setTimeout(() => handleRunTask(), 100);
+    }
+  }}
+/>
                       <button
-                        onClick={handleRunTask}
+                        onClick={() => handleRunTask()}
                         disabled={!prompt.trim() && pendingImages.length === 0}
                         style={{
                           padding: "9px 14px", border: "none",
@@ -4474,13 +4085,13 @@ export default function OfficePage() {
       )}
 
       {showHireModal && (
-        <HireModal
+        <AgentManagementModal
+          isOpen={showHireModal}
+          onClose={() => setShowHireModal(false)}
           agentDefs={agentDefs}
           onHire={handleHire}
-          onCreate={() => { setShowHireModal(false); setEditingAgent(null); setShowCreateAgent(true); }}
-          onEdit={(def) => { setShowHireModal(false); setEditingAgent(def); setShowCreateAgent(true); }}
-          onDelete={handleDeleteAgentDef}
-          onClose={() => setShowHireModal(false)}
+          onSaveDef={handleSaveAgentDef}
+          onDeleteDef={handleDeleteAgentDef}
           assetsReady={assetsReady}
         />
       )}
@@ -4489,14 +4100,23 @@ export default function OfficePage() {
         <HireTeamModal agentDefs={agentDefs} onCreateTeam={handleCreateTeam} onClose={() => setShowHireTeamModal(false)} assetsReady={assetsReady} />
       )}
 
-      {showCreateAgent && (
-        <CreateAgentModal
-          onSave={handleSaveAgentDef}
-          onClose={() => { setShowCreateAgent(false); setEditingAgent(null); }}
-          assetsReady={assetsReady}
-          editAgent={editingAgent}
-        />
-      )}
+      <AnimatePresence>
+        {showOfficeSwitcher && (
+          <OfficeSwitcher
+            isOpen={showOfficeSwitcher}
+            onClose={() => setShowOfficeSwitcher(false)}
+            onSelect={(layout, backgroundImage) => {
+              setAssetsReady(false);
+              handleImportRoomZip(layout, backgroundImage);
+              try { const id = localStorage.getItem('office-selected-id'); if (id) setCurrentOfficeId(id); } catch {}
+              // Brief delay so the loading overlay shows the walking animation
+              setTimeout(() => setAssetsReady(true), 800);
+            }}
+            currentOfficeId={currentOfficeId}
+          />
+        )}
+        {showKnowledge && <KnowledgeModal isOpen={showKnowledge} onClose={() => setShowKnowledge(false)} />}
+      </AnimatePresence>
 
       {officeStateRef.current && (
         <SettingsModal
@@ -4510,24 +4130,11 @@ export default function OfficePage() {
         />
       )}
 
-      <OfficeSwitcher
-        isOpen={showOfficeSwitcher}
-        onClose={() => setShowOfficeSwitcher(false)}
-        onSelect={(layout, backgroundImage) => {
-          setAssetsReady(false);
-          handleImportRoomZip(layout, backgroundImage);
-          try { const id = localStorage.getItem('office-selected-id'); if (id) setCurrentOfficeId(id); } catch {}
-          // Brief delay so the loading overlay shows the walking animation
-          setTimeout(() => setAssetsReady(true), 800);
-        }}
-        currentOfficeId={currentOfficeId}
-      />
-
       <ProjectHistory
         isOpen={showHistory}
         onClose={() => setShowHistory(false)}
         onPreview={(preview, ratings) => {
-          const url = computePreviewUrl(preview);
+          const url = computePreviewUrl(preview, getGatewayHttpUrl());
           if (url) setPreviewUrl(url);
           if (ratings && Object.keys(ratings).length > 0) {
             setPreviewRatings(ratings as Ratings);
@@ -4617,6 +4224,29 @@ export default function OfficePage() {
           Run Demo
         </button>
       )}
+
+      <AnimatePresence>
+        {showThoughtStream && (
+          <ThoughtStreamSidebar 
+            key="thought-stream-sidebar"
+            isOpen={showThoughtStream} 
+            onClose={() => setShowThoughtStream(false)} 
+            style={{ zIndex: 100000 }}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showHealthDashboard && (
+          <SwarmHealthDashboard 
+            key="swarm-health-dashboard"
+            isOpen={showHealthDashboard} 
+            onClose={() => setShowHealthDashboard(false)} 
+            style={{ zIndex: 100001 }}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
+
 }

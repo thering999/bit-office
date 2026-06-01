@@ -1,4 +1,4 @@
-import { TILE_SIZE, MATRIX_EFFECT_DURATION, CharacterState, Direction } from '../types'
+import { TILE_SIZE, MATRIX_EFFECT_DURATION, CharacterState, Direction, FurnitureType } from '../types'
 import type { Character, Seat, FurnitureInstance, TileType as TileTypeVal, OfficeLayout, PlacedFurniture } from '../types'
 import { createCharacter, updateCharacter } from './characters'
 import { matrixEffectSeeds } from './matrixEffect'
@@ -192,9 +192,24 @@ export class OfficeState {
     if (!ch) return
 
     const wasActive = ch.isActive
-    const isNowActive = status === 'working' || status === 'waiting_approval'
+    const isNowActive = status === 'working' || status === 'waiting_approval' || status === 'thinking' || status === 'coding' || status === 'searching' || status === 'testing' || status === 'walking_to_server'
 
     ch.isActive = isNowActive
+    if (status === 'thinking' || status === 'waiting_approval') {
+      ch.targetState = CharacterState.THINK
+    } else if (status === 'coding' || status === 'working') {
+      ch.targetState = CharacterState.TYPE
+    } else if (status === 'searching') {
+      ch.targetState = CharacterState.SEARCHING
+    } else if (status === 'testing') {
+      ch.targetState = CharacterState.TESTING
+    } else if (status === 'walking_to_server') {
+      ch.targetState = CharacterState.WALKING_TO_SERVER
+    } else if (status === 'documenting') {
+      ch.targetState = CharacterState.DOCUMENTING
+    } else {
+      ch.targetState = CharacterState.IDLE
+    }
 
     // Team members always need a seat — assign one if they don't have one yet,
     // regardless of current status. This avoids a race condition where the bridge
@@ -230,25 +245,58 @@ export class OfficeState {
         ch.moveProgress = 0
       }
       this.rebuildFurnitureInstances()
-    } else if (isNowActive && !wasActive) {
-      // Just became active — find a free work seat
-      if (!ch.seatId) {
-        // Release rest seat if sitting on one
-        if (ch.restSeatId) {
-          const rs = this.seats.get(ch.restSeatId)
-          if (rs) rs.assigned = false
-          ch.restSeatId = null
-          ch.seatTimer = 0
-        }
-        const seatId = this.findFreeSeat()
-        if (seatId) {
-          const seat = this.seats.get(seatId)!
-          seat.assigned = true
-          ch.seatId = seatId
-        }
+    } else if (isNowActive && (!wasActive || (ch.seatId && this.shouldChangeSeatForActivity(ch, status)))) {
+      // Just became active or needs a more appropriate seat for current activity
+      
+      // Release current seat if it's not the right type for the new activity
+      if (ch.seatId) {
+        const seat = this.seats.get(ch.seatId)
+        if (seat) seat.assigned = false
+        ch.seatId = null
+      }
+
+      // Release rest seat if sitting on one
+      if (ch.restSeatId) {
+        const rs = this.seats.get(ch.restSeatId)
+        if (rs) rs.assigned = false
+        ch.restSeatId = null
+        ch.seatTimer = 0
+      }
+
+      const seatId = this.findFreeSeat(status)
+      if (seatId) {
+        const seat = this.seats.get(seatId)!
+        seat.assigned = true
+        ch.seatId = seatId
       }
       this.rebuildFurnitureInstances()
     }
+  }
+
+  /** Returns true if the character's current seat is inappropriate for the new status */
+  private shouldChangeSeatForActivity(ch: Character, status: AgentStatus): boolean {
+    if (!ch.seatId) return true
+    const seat = this.seats.get(ch.seatId)
+    if (!seat) return true
+
+    // Only change if the new status has a specific furniture preference
+    const preferredTypes = this.getPreferredFurnitureForStatus(status)
+    if (preferredTypes.length === 0) return false
+
+    // Find furniture this seat is facing
+    const dCol = seat.facingDir === Direction.RIGHT ? 1 : seat.facingDir === Direction.LEFT ? -1 : 0
+    const dRow = seat.facingDir === Direction.DOWN ? 1 : seat.facingDir === Direction.UP ? -1 : 0
+    
+    const targetCol = seat.seatCol + dCol
+    const targetRow = seat.seatRow + dRow
+
+    const furnitureAtTarget = this.layout.furniture.find(f => 
+      targetCol >= f.col && targetCol < f.col + (getCatalogEntry(f.type)?.footprintW || 1) &&
+      targetRow >= f.row && targetRow < f.row + (getCatalogEntry(f.type)?.footprintH || 1)
+    )
+
+    if (!furnitureAtTarget) return true // Facing nothing? Move to something appropriate.
+    return !preferredTypes.includes(furnitureAtTarget.type as any)
   }
 
   selectCharacter(agentId: string | null): void {
@@ -329,7 +377,8 @@ export class OfficeState {
     const chars = this.getCharacters().sort((a, b) => b.y - a.y)
     for (const ch of chars) {
       if (ch.matrixEffect === 'despawn') continue
-      const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0
+      const isSitting = ch.state === CharacterState.TYPE || ch.state === CharacterState.THINK || ch.state === CharacterState.SEARCHING || ch.state === CharacterState.TESTING
+      const sittingOffset = isSitting ? CHARACTER_SITTING_OFFSET_PX : 0
       const anchorY = ch.y + sittingOffset
       const left = ch.x - CHARACTER_HIT_HALF_WIDTH * s
       const right = ch.x + CHARACTER_HIT_HALF_WIDTH * s
@@ -348,7 +397,8 @@ export class OfficeState {
     const chars = this.getCharacters().sort((a, b) => b.y - a.y)
     for (const ch of chars) {
       if (ch.matrixEffect === 'despawn') continue
-      const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0
+      const isSitting = ch.state === CharacterState.TYPE || ch.state === CharacterState.THINK || ch.state === CharacterState.SEARCHING || ch.state === CharacterState.TESTING
+      const sittingOffset = isSitting ? CHARACTER_SITTING_OFFSET_PX : 0
       const anchorY = ch.y + sittingOffset
       const left = ch.x - CHARACTER_HIT_HALF_WIDTH * s
       const right = ch.x + CHARACTER_HIT_HALF_WIDTH * s
@@ -481,12 +531,85 @@ export class OfficeState {
 
   // ── Private helpers ───────────────────────────────────────────
 
-  private findFreeSeat(): string | null {
+  private findFreeSeat(status?: AgentStatus): string | null {
+    const preferredTypes = status ? this.getPreferredFurnitureForStatus(status) : []
+    
+    // First pass: try to find a seat facing preferred furniture
+    if (preferredTypes.length > 0) {
+      for (const [uid, seat] of this.seats) {
+        if (seat.assigned || seat.isRest) continue
+        
+        const dCol = seat.facingDir === Direction.RIGHT ? 1 : seat.facingDir === Direction.LEFT ? -1 : 0
+        const dRow = seat.facingDir === Direction.DOWN ? 1 : seat.facingDir === Direction.UP ? -1 : 0
+        const targetCol = seat.seatCol + dCol
+        const targetRow = seat.seatRow + dRow
+
+        const furnitureAtTarget = this.layout.furniture.find(f => 
+          targetCol >= f.col && targetCol < f.col + (getCatalogEntry(f.type)?.footprintW || 1) &&
+          targetRow >= f.row && targetRow < f.row + (getCatalogEntry(f.type)?.footprintH || 1)
+        )
+
+        if (furnitureAtTarget && preferredTypes.includes(furnitureAtTarget.type as any)) {
+          return uid
+        }
+      }
+    }
+
+    // Second pass: fallback to any free work seat
     for (const [uid, seat] of this.seats) {
       if (!seat.assigned && !seat.isRest) return uid
     }
     return null
   }
+
+  private getPreferredFurnitureForStatus(status: AgentStatus): string[] {
+    switch (status) {
+      case 'searching':
+        return [
+          FurnitureType.BOOKSHELF, 
+          FurnitureType.TS_BOOKSHELF, 
+          FurnitureType.TS_BOOKSHELF_COLOR, 
+          FurnitureType.TS_CABINET
+        ]
+      case 'testing':
+        return [
+          FurnitureType.PC, 
+          FurnitureType.TS_COMPUTER, 
+          FurnitureType.TS_LAPTOP, 
+          FurnitureType.TS_MONITOR
+        ]
+      case 'coding':
+      case 'working':
+        return [
+          FurnitureType.DESK, 
+          FurnitureType.TS_DESK_WOOD, 
+          FurnitureType.TS_DESK_GRAY, 
+          FurnitureType.TS_TABLE_LONG
+        ]
+      case 'thinking':
+        return [
+          FurnitureType.WHITEBOARD,
+          FurnitureType.TS_WHITEBOARD,
+          FurnitureType.DESK,
+          FurnitureType.TS_DESK_WOOD
+        ]
+      case 'walking_to_server':
+        return [
+          FurnitureType.SERVER,
+          FurnitureType.TS_COMPUTER,
+          FurnitureType.TS_MONITOR
+        ]
+      case 'debugging':
+        return [
+          FurnitureType.SERVER,
+          FurnitureType.TS_LAPTOP,
+          FurnitureType.TS_MONITOR
+        ]
+      default:
+        return []
+    }
+  }
+
 
   /** Find a free rest seat (sofa, etc.) for idle characters */
   findFreeRestSeat(): string | null {

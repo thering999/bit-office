@@ -45,7 +45,7 @@ export class RetryTracker {
     const s = this.state.get(taskId);
     if (!s) return undefined;
     s.attempt++;
-    s.errors.push(error);
+    s.errors.push(String(error || "unknown error"));
     return { ...s };
   }
 
@@ -55,7 +55,7 @@ export class RetryTracker {
   getRetryPrompt(taskId: string): string | null {
     const s = this.state.get(taskId);
     if (!s) return null;
-    const lastError = s.errors[s.errors.length - 1] ?? "unknown error";
+    const lastError = String(s.errors[s.errors.length - 1] ?? "unknown error");
     return `${s.originalPrompt}
 
 [RETRY — Attempt ${s.attempt + 1}/${s.maxRetries}]
@@ -79,16 +79,21 @@ Do NOT repeat the same approach that failed.`;
     if (!s) return null;
     if (s.attempt < s.maxRetries) return null;
 
-    const errorList = s.errors.map((e, i) => `  Attempt ${i + 1}: ${e.slice(0, 200)}`).join("\n");
-    const sameError = s.errors.length >= 2 && s.errors.every(e => {
+    const safeErrors = (s.errors || []).map(e => String(e || "unknown error"));
+    const errorList = safeErrors.map((e, i) => `  Attempt ${i + 1}: ${e.slice(0, 200)}`).join("\n");
+    
+    const firstError = safeErrors[0] || "";
+    const sameError = safeErrors.length >= 2 && safeErrors.every(e => {
       const key = e.slice(0, 80).toLowerCase();
-      return key === s.errors[0].slice(0, 80).toLowerCase();
+      return key === firstError.slice(0, 80).toLowerCase();
     });
+
+    const originalPrompt = String(s.originalPrompt || "No prompt provided");
 
     return {
       prompt: `[ESCALATION] A task has failed after ${s.attempt} attempts and needs your decision.
 
-Original task: "${s.originalPrompt.slice(0, 300)}"
+Original task: "${originalPrompt.slice(0, 300)}"
 
 Failure history:
 ${errorList}

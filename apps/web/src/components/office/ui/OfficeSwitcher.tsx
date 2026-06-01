@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import JSZip from 'jszip'
 import type { OfficeLayout } from '../types'
 import { loadRoomZipFromUrl } from '../layout/roomZipLoader'
+import { resolveAssetPath } from '@/lib/assets'
 
 interface OfficeEntry {
   id: string
@@ -24,10 +25,7 @@ interface OfficeSwitcherProps {
 }
 
 // Support Next.js basePath (e.g. /bit-office on GitHub Pages)
-const BASE_PATH = typeof window !== 'undefined'
-  ? (window.__NEXT_DATA__?.nextExport ? (process.env.NEXT_PUBLIC_BASE_PATH || '') : '')
-  : (process.env.NEXT_PUBLIC_BASE_PATH || '')
-const OFFICES_BASE = `${BASE_PATH}/offices`
+const OFFICES_BASE = resolveAssetPath('/offices')
 
 /** Extract background image from a zip as a blob URL for thumbnail */
 async function extractThumbnail(zipUrl: string): Promise<string | null> {
@@ -288,8 +286,7 @@ export default function OfficeSwitcher({ isOpen, onClose, onSelect, currentOffic
 
 /** Load the default office on startup */
 export async function loadDefaultOffice(): Promise<{ layout: import('../types').OfficeLayout; backgroundImage: HTMLImageElement | null; officeId: string } | null> {
-  const basePath = typeof window !== 'undefined' ? (process.env.NEXT_PUBLIC_BASE_PATH || '') : ''
-  const officesBase = `${basePath}/offices`
+  const officesBase = resolveAssetPath('/offices')
   try {
     const res = await fetch(`${officesBase}/index.json`)
     if (!res.ok) return null

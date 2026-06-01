@@ -11,6 +11,11 @@ interface BottomToolbarProps {
   onToggleTest?: () => void
   testActive?: boolean
   showEditorControls?: boolean
+  onOpenThoughtStream?: () => void
+  onToggleHealth?: () => void
+  onToggleJarvis?: () => void
+  jarvisActive?: boolean
+  onOpenKnowledge?: () => void
 }
 
 const panelStyle: React.CSSProperties = {
@@ -48,11 +53,113 @@ const btnActive: React.CSSProperties = {
   color: 'rgba(160, 185, 255, 0.9)',
 }
 
-export default function BottomToolbar({ editMode, onToggleEditMode, onOpenSettings, onOpenHistory, onOpenOfficeSwitcher, onToggleTest, testActive, showEditorControls = true }: BottomToolbarProps) {
+export default function BottomToolbar({ 
+  editMode, 
+  onToggleEditMode, 
+  onOpenSettings, 
+  onOpenHistory, 
+  onOpenOfficeSwitcher, 
+  onToggleTest, 
+  testActive, 
+  showEditorControls = true,
+  onOpenThoughtStream,
+  onToggleHealth,
+  onToggleJarvis,
+  jarvisActive,
+  onOpenKnowledge
+}: BottomToolbarProps) {
   const [hovered, setHovered] = useState<string | null>(null)
 
   return (
     <div style={panelStyle}>
+      {onToggleHealth && (
+        <button
+          onClick={() => { 
+            console.log("[BottomToolbar] Health Clicked, onToggleHealth available:", !!onToggleHealth);
+            if (onToggleHealth) onToggleHealth(); 
+          }}
+          onMouseEnter={() => setHovered('health')}
+          onMouseLeave={() => setHovered(null)}
+          style={{
+            ...btnBase,
+            background: hovered === 'health' ? 'rgba(16, 185, 129, 0.15)' : 'transparent',
+            color: hovered === 'health' ? '#10b981' : 'rgba(16, 185, 129, 0.6)',
+            borderColor: hovered === 'health' ? 'rgba(16, 185, 129, 0.3)' : 'transparent',
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '0.1em',
+            fontSize: '10px'
+          }}
+          title="Swarm Health Dashboard"
+        >
+          Health
+        </button>
+      )}
+      {onOpenThoughtStream && (
+        <button
+          onClick={() => { 
+            console.log("[BottomToolbar] Cognition Clicked, onOpenThoughtStream available:", !!onOpenThoughtStream);
+            if (onOpenThoughtStream) onOpenThoughtStream(); 
+          }}
+          onMouseEnter={() => setHovered('cognition')}
+          onMouseLeave={() => setHovered(null)}
+          style={{
+            ...btnBase,
+            background: hovered === 'cognition' ? 'rgba(99, 102, 241, 0.15)' : 'transparent',
+            color: hovered === 'cognition' ? '#818cf8' : 'rgba(129, 140, 248, 0.6)',
+            borderColor: hovered === 'cognition' ? 'rgba(99, 102, 241, 0.3)' : 'transparent',
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '0.1em',
+            fontSize: '10px'
+          }}
+          title="Open Deliberation Stream"
+        >
+          Cognition
+        </button>
+      )}
+
+      {onToggleJarvis && (
+        <button
+          onClick={onToggleJarvis}
+          onMouseEnter={() => setHovered('jarvis')}
+          onMouseLeave={() => setHovered(null)}
+          style={{
+            ...btnBase,
+            background: jarvisActive ? 'rgba(59, 130, 246, 0.2)' : (hovered === 'jarvis' ? 'rgba(59, 130, 246, 0.15)' : 'transparent'),
+            color: jarvisActive ? '#3b82f6' : (hovered === 'jarvis' ? '#60a5fa' : 'rgba(59, 130, 246, 0.6)'),
+            borderColor: jarvisActive ? 'rgba(59, 130, 246, 0.5)' : (hovered === 'jarvis' ? 'rgba(59, 130, 246, 0.3)' : 'transparent'),
+            fontWeight: 700,
+            textTransform: 'uppercase',
+            letterSpacing: '0.12em',
+            fontSize: '10px',
+            boxShadow: jarvisActive ? '0 0 10px rgba(59, 130, 246, 0.3)' : 'none'
+          }}
+          title="Toggle Always-On Voice (Jarvis Mode)"
+        >
+          Jarvis
+        </button>
+      )}
+      {onOpenKnowledge && (
+        <button
+          onClick={onOpenKnowledge}
+          onMouseEnter={() => setHovered('knowledge')}
+          onMouseLeave={() => setHovered(null)}
+          style={{
+            ...btnBase,
+            background: hovered === 'knowledge' ? 'rgba(139, 92, 246, 0.15)' : 'transparent',
+            color: hovered === 'knowledge' ? '#a78bfa' : 'rgba(139, 92, 246, 0.6)',
+            borderColor: hovered === 'knowledge' ? 'rgba(139, 92, 246, 0.3)' : 'transparent',
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '0.1em',
+            fontSize: '10px'
+          }}
+          title="Open Project Knowledge (NotebookLM)"
+        >
+          Knowledge
+        </button>
+      )}
       {onOpenOfficeSwitcher && (
         <button
           onClick={onOpenOfficeSwitcher}

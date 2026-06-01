@@ -1,5 +1,7 @@
 import type { GatewayEvent, Command, UserRole } from "@office/shared";
 
+
+
 export interface CommandMeta {
   role: UserRole;
   clientId: string;
@@ -54,12 +56,58 @@ export async function initTransports(commandHandler: (cmd: Command, meta: Comman
   }
 }
 
+const BATCHABLE_TYPES = new Set([
+  "LOG_APPEND",
+  "AGENT_STATUS",
+  "TOKEN_UPDATE",
+  "TOOL_STARTED",
+  "TOOL_FINISHED",
+  "META_THOUGHT",
+]);
+
+let batchBuffer: GatewayEvent[] = [];
+let batchTimer: NodeJS.Timeout | null = null;
+
+function flushBatch() {
+  if (batchBuffer.length === 0) return;
+  
+  const batchEvent: GatewayEvent = {
+    type: "BATCH",
+    events: [...batchBuffer],
+  } as any;
+  
+  for (const ch of channels) {
+    ch.broadcast(batchEvent);
+  }
+  
+  batchBuffer = [];
+  if (batchTimer) {
+    clearTimeout(batchTimer);
+    batchTimer = null;
+  }
+}
+
 /** Broadcast event to all active channels */
 export function publishEvent(event: GatewayEvent) {
+  if (BATCHABLE_TYPES.has(event.type)) {
+    batchBuffer.push(event);
+    if (batchBuffer.length >= 50) {
+      flushBatch();
+    } else if (!batchTimer) {
+      batchTimer = setTimeout(flushBatch, 50);
+    }
+    return;
+  }
+  
+  // Non-batchable (critical) events flush pending batch first to preserve order
+  flushBatch();
+  
   for (const ch of channels) {
     ch.broadcast(event);
   }
 }
+
+
 
 /** Destroy all channels on shutdown */
 export function destroyTransports() {

@@ -1,3 +1,4 @@
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 import { registerChannel, initTransports, publishEvent, destroyTransports } from "./transport.js";
 import { wsChannel, setPairCode } from "./ws-server.js";
 import { ablyChannel } from "./ably-client.js";
@@ -5,8 +6,11 @@ import { telegramChannel } from "./telegram-channel.js";
 import { config, hasSetupRun, reloadConfig, saveConfig } from "./config.js";
 import { runSetup } from "./setup.js";
 import { detectBackends, getBackend, getAllBackends } from "./backends.js";
-import { createOrchestrator, previewServer, recordProjectRatings, parseAgentOutput, type Orchestrator, type OrchestratorEvent, type TeamPhaseChangedEvent } from "@bit-office/orchestrator";
+import { createOrchestrator, previewServer, recordProjectRatings, parseAgentOutput, knowledgeManager, type Orchestrator, type OrchestratorEvent, type TeamPhaseChangedEvent } from "@bit-office/orchestrator";
+import { CommandSchema, mapOrchestratorEvent as sharedMapEvent } from "@office/shared";
+import { bus } from "@office/shared/infra/bus";
 import type { Command, GatewayEvent, UserRole } from "@office/shared";
+
 import type { CommandMeta } from "./transport.js";
 import { DEFAULT_AGENT_DEFS, type AgentDefinition } from "@office/shared";
 import { nanoid } from "nanoid";
@@ -18,6 +22,8 @@ import { ProcessScanner } from "./process-scanner.js";
 import { ExternalOutputReader } from "./external-output-reader.js";
 import { loadTeamState, saveTeamState, clearTeamState, type TeamState, type PersistedAgent, bufferEvent, archiveProject, resetProjectBuffer, setProjectName, listProjects, loadProject, loadProjectBuffer, rateProject } from "./team-state.js";
 import { OpenClawAdapter } from "./openclaw-adapter.js";
+import { SwarmHealthMonitor } from "./swarm-health.js";
+import { keyManager } from "./key-manager.js";
 
 // Register all channels — each one self-activates if configured
 registerChannel(wsChannel);
@@ -28,6 +34,7 @@ let orc: Orchestrator;
 let scanner: ProcessScanner | null = null;
 let outputReader: ExternalOutputReader | null = null;
 let openclawAdapter: OpenClawAdapter | null = null;
+let healthMonitor: SwarmHealthMonitor | null = null;
 
 function summarizeOpenClawText(text: string, max = 180) {
   const cleaned = text.replace(/\s+/g, " ").trim();
@@ -318,65 +325,17 @@ function buildArchiveTeam(): TeamState["team"] {
 // ---------------------------------------------------------------------------
 
 function mapOrchestratorEvent(e: OrchestratorEvent): GatewayEvent | null {
-  switch (e.type) {
-    case "task:started":
-      return { type: "TASK_STARTED", agentId: e.agentId, taskId: e.taskId, prompt: e.prompt };
-    case "task:done":
-      return { type: "TASK_DONE", agentId: e.agentId, taskId: e.taskId, result: e.result, isFinalResult: e.isFinalResult };
-    case "task:failed":
-      return { type: "TASK_FAILED", agentId: e.agentId, taskId: e.taskId, error: e.error };
-    case "task:delegated":
-      return { type: "TASK_DELEGATED", fromAgentId: e.fromAgentId, toAgentId: e.toAgentId, taskId: e.taskId, prompt: e.prompt };
-    case "agent:status":
-      return { type: "AGENT_STATUS", agentId: e.agentId, status: e.status };
-    case "approval:needed":
-      return { type: "APPROVAL_NEEDED", approvalId: e.approvalId, agentId: e.agentId, taskId: e.taskId, title: e.title, summary: e.summary, riskLevel: e.riskLevel };
-    case "log:append":
-      return { type: "LOG_APPEND", agentId: e.agentId, taskId: e.taskId, stream: e.stream, chunk: e.chunk };
-    case "team:chat":
-      return { type: "TEAM_CHAT", fromAgentId: e.fromAgentId, toAgentId: e.toAgentId, message: e.message, messageType: e.messageType, taskId: e.taskId, timestamp: e.timestamp };
-    case "task:queued":
-      return { type: "TASK_QUEUED", agentId: e.agentId, taskId: e.taskId, prompt: e.prompt, position: e.position };
-    case "agent:created":
-      return { type: "AGENT_CREATED", agentId: e.agentId, name: e.name, role: e.role, palette: e.palette, personality: e.personality, backend: e.backend, isTeamLead: e.isTeamLead || undefined, teamId: e.teamId, workDir: agentWorkDirs.get(e.agentId) ?? config.defaultWorkspace };
-    case "agent:fired":
-      return { type: "AGENT_FIRED", agentId: e.agentId };
-    case "task:result-returned":
-      return { type: "TASK_RESULT_RETURNED", fromAgentId: e.fromAgentId, toAgentId: e.toAgentId, taskId: e.taskId, summary: e.summary, success: e.success };
-    case "team:phase": {
-      // Phase transitions are managed by orchestrator — persist and publish to wire protocol
-      const phaseEvt = { type: "TEAM_PHASE" as const, teamId: e.teamId, phase: e.phase, leadAgentId: e.leadAgentId };
-      bufferEvent(phaseEvt);
-      publishEvent(phaseEvt);
-      persistTeamState();
+  // Use the shared mapper for standard transitions
+  const mapped = sharedMapEvent(e);
 
-      // Archive project when it reaches "complete" so ratings and history are available immediately
-      if (e.phase === "complete") {
-        archiveProject(buildArchiveAgents(), buildArchiveTeam());
-        // Don't resetProjectBuffer here — user may give feedback and continue
-      }
-
-      return null; // already published directly
-    }
-    case "token:update":
-      return { type: "TOKEN_UPDATE", agentId: e.agentId, inputTokens: e.inputTokens, outputTokens: e.outputTokens };
-    // New events (worktree, retry) — log only, no wire protocol equivalent yet
-    case "task:retrying":
-      console.log(`[Retry] Agent ${e.agentId} retrying task ${e.taskId} (attempt ${e.attempt}/${e.maxRetries})`);
-      return null;
-    case "worktree:created":
-      console.log(`[Worktree] Created ${e.worktreePath} for agent ${e.agentId}`);
-      return null;
-    case "worktree:merged":
-      console.log(`[Worktree] Merged branch ${e.branch} for agent ${e.agentId} (success=${e.success}${e.conflictFiles?.length ? ` conflicts=${e.conflictFiles.join(",")}` : ""})`);
-      return null;
-    case "agent:activity":
-      console.log(`[Activity] ${e.agentName} [${e.phase}]: ${e.intent.slice(0, 80)}`);
-      return null;
-    default:
-      return null;
+  // Add gateway-specific metadata that isn't known to the shared package (e.g. agentWorkDirs)
+  if (mapped && mapped.type === "AGENT_CREATED") {
+    mapped.workDir = agentWorkDirs.get(mapped.agentId) ?? config.defaultWorkspace;
   }
+
+  return mapped;
 }
+
 
 // ---------------------------------------------------------------------------
 // RBAC — role-based command permission
@@ -486,7 +445,7 @@ function handleCommand(parsed: Command, meta: CommandMeta) {
           suggestions.length = 0; // consumed
         }
         const effectiveRepoPath = parsed.repoPath || agentWorkDirs.get(parsed.agentId);
-        orc.runTask(parsed.agentId, parsed.taskId, finalPrompt, { repoPath: effectiveRepoPath, phaseOverride });
+        orc.runTask(parsed.agentId, { taskId: parsed.taskId, prompt: finalPrompt, repoPath: effectiveRepoPath, phaseOverride });
       } else {
         publishEvent({
           type: "TASK_FAILED",
@@ -537,15 +496,26 @@ function handleCommand(parsed: Command, meta: CommandMeta) {
     }
     case "PICK_FOLDER": {
       console.log(`[Gateway] PICK_FOLDER: opening native folder picker`);
-      const script = 'osascript -e \'tell application "System Events" to activate\' -e \'POSIX path of (choose folder with prompt "Select working directory")\'';
-      exec(script, (err, stdout) => {
-        const folderPath = stdout?.trim();
-        if (!err && folderPath) {
-          // Remove trailing slash
-          const cleanPath = folderPath.replace(/\/$/, "");
-          publishEvent({ type: "FOLDER_PICKED", requestId: parsed.requestId, path: cleanPath });
-        }
-      });
+      let script = "";
+      if (os.platform() === "win32") {
+        script = 'powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = \'Select working directory\'; if ($f.ShowDialog() -eq \'OK\') { $f.SelectedPath }"';
+      } else if (os.platform() === "darwin") {
+        script = 'osascript -e \'tell application "System Events" to activate\' -e \'POSIX path of (choose folder with prompt "Select working directory")\'';
+      } else {
+        // Fallback for Linux (try zenity)
+        script = 'zenity --file-selection --directory --title="Select working directory"';
+      }
+
+      if (script) {
+        exec(script, (err, stdout) => {
+          const folderPath = stdout?.trim();
+          if (!err && folderPath) {
+            // Remove trailing slash/backslash
+            const cleanPath = folderPath.replace(/[\\/]$/, "");
+            publishEvent({ type: "FOLDER_PICKED", requestId: parsed.requestId, path: cleanPath });
+          }
+        });
+      }
       break;
     }
     case "UPLOAD_IMAGE": {
@@ -593,8 +563,8 @@ function handleCommand(parsed: Command, meta: CommandMeta) {
       // Keep solo agents intact — they are independent
       const newTeamDefNames = new Set(allIds.map(id => agentDefs.find(a => a.id === id)?.name).filter(Boolean));
       for (const agent of orc.getAllAgents()) {
-        if (agent.teamId && !agent.isTeamLead) {
-          // Remove old team members (will be re-created below)
+        if (agent.teamId) {
+          // Remove old team agents (will be re-created below with new IDs)
           console.log(`[Gateway] Removing old team agent "${agent.name}" before team creation`);
           orc.removeAgent(agent.agentId);
         }
@@ -639,7 +609,52 @@ function handleCommand(parsed: Command, meta: CommandMeta) {
 
         orc.setTeamPhase(teamId, "create", leadAgentId);
         const greetTaskId = nanoid();
-        orc.runTask(leadAgentId, greetTaskId, "Greet the user and ask what they would like to build.", { phaseOverride: "create" });
+        orc.runTask(leadAgentId, { taskId: greetTaskId, prompt: "Greet the user and ask what they would like to build.", phaseOverride: "create" });
+      }
+      break;
+    }
+    case "ASSEMBLE_SWARM": {
+      console.log(`[Gateway] ASSEMBLE_SWARM: prompt="${parsed.prompt.slice(0, 50)}..."`);
+      orc.assembleAndCreateTeam(parsed.prompt);
+      break;
+    }
+    case "RUN_DOCTOR": {
+      console.log("[Gateway] RUN_DOCTOR: Starting diagnostics");
+      orc.runDoctor();
+      break;
+    }
+    case "RESCUE_SWARM": {
+      console.log("[Gateway] RESCUE_SWARM: Emergency rescue triggered");
+      orc.rescueSwarm();
+      // Broadcast health update immediately
+      publishEvent({
+        type: "SWARM_HEALTH",
+        teamId: "global",
+        score: 100,
+        status: "optimal",
+        diagnostics: ["Rescue mission complete. Swarm reset to defaults."],
+        recommendations: ["Monitor agent behavior as they resume tasks."],
+      });
+      break;
+    }
+    case "SYNC_KNOWLEDGE": {
+      const projectDir = parsed.projectDir || orc.getTeamProjectDir() || "default";
+      console.log(`[Gateway] SYNC_KNOWLEDGE for projectDir: ${projectDir}`);
+      const knowledgePath = path.join(os.homedir(), ".bit-office", "knowledge", projectDir, "PROJECT_KNOWLEDGE.md");
+      try {
+        if (existsSync(knowledgePath)) {
+          const content = readFileSync(knowledgePath, "utf-8");
+          publishEvent({
+            type: "KNOWLEDGE_SYNCED",
+            projectDir,
+            content,
+          });
+        } else {
+          // If not found in home, check if it's in a temporary location or create a skeleton
+          console.warn(`[Gateway] Knowledge file not found at ${knowledgePath}`);
+        }
+      } catch (err) {
+        console.error(`[Gateway] SYNC_KNOWLEDGE failed:`, err);
       }
       break;
     }
@@ -705,7 +720,7 @@ function handleCommand(parsed: Command, meta: CommandMeta) {
       const phaseResult = orc.approvePlan(agentId);
       if (phaseResult) {
         const taskId = nanoid();
-        orc.runTask(agentId, taskId, `The user approved your plan. Execute it now by delegating tasks to your team members. All work must go in the project directory: ${path.basename(projectDir)}/`, { phaseOverride: "execute" });
+        orc.runTask(agentId, { taskId, prompt: `The user approved your plan. Execute it now by delegating tasks to your team members. All work must go in the project directory: ${path.basename(projectDir)}/`, phaseOverride: "execute" });
       }
       break;
     }
@@ -743,7 +758,7 @@ function handleCommand(parsed: Command, meta: CommandMeta) {
       orc.setTeamLead(agentId);
       orc.setTeamPhase(foundTeamId, "create", agentId);
       const greetTaskId = nanoid();
-      orc.runTask(agentId, greetTaskId, "Greet the user and ask what they would like to build next.", { phaseOverride: "create" });
+      orc.runTask(agentId, { taskId: greetTaskId, prompt: "Greet the user and ask what they would like to build next.", phaseOverride: "create" });
       break;
     }
     case "PING": {
@@ -754,6 +769,17 @@ function handleCommand(parsed: Command, meta: CommandMeta) {
       for (const [, ext] of externalAgents) { allAgentIds.push(ext.agentId); }
       for (const id of openclawAdapter?.getAgentIds() ?? []) { allAgentIds.push(id); }
       publishEvent({ type: "AGENTS_SYNC", agentIds: allAgentIds });
+      
+      const detected = detectBackends();
+      const syncBackends = getAllBackends().map(b => ({
+        id: b.id,
+        name: b.name,
+        color: (b as any).color || "#6366f1",
+        isInstalled: detected.includes(b.id)
+      }));
+      console.log(`[Gateway] Syncing ${syncBackends.length} backends to client`);
+      publishEvent({ type: "BACKENDS_SYNC", backends: syncBackends });
+
       for (const agent of allAgents) {
         publishEvent({
           type: "AGENT_CREATED",
@@ -896,6 +922,29 @@ function handleCommand(parsed: Command, meta: CommandMeta) {
       }
       break;
     }
+    case "GET_CONFIG": {
+      publishEvent({ type: "CONFIG_DATA", config });
+      publishEvent({ type: "AGENT_DEFS", agents: agentDefs });
+      break;
+    }
+    case "UPDATE_CONFIG": {
+      const updates = parsed.config as any;
+      saveConfig(updates); 
+      reloadConfig();
+      publishEvent({ type: "CONFIG_UPDATED", config });
+      break;
+    }
+    case "GET_KEY_STATUS": {
+      const summary = keyManager.getSummary();
+      publishEvent({ type: "KEY_STATUS_DATA", summary });
+      break;
+    }
+    case "RESET_KEYS": {
+      keyManager.resetAll();
+      const summary = keyManager.getSummary();
+      publishEvent({ type: "KEY_STATUS_DATA", summary });
+      break;
+    }
   }
 }
 
@@ -904,6 +953,35 @@ function handleCommand(parsed: Command, meta: CommandMeta) {
 // ---------------------------------------------------------------------------
 
 async function main() {
+  // Write custom .aider.model.metadata.json to home directory to prevent Aider from requesting too many output tokens on OpenRouter and Typhoon
+  try {
+    const metadataPath = path.join(os.homedir(), ".aider.model.metadata.json");
+    const metadata = {
+      "openrouter/google/gemini-2.0-flash-001": {
+        "max_tokens": 8192,
+        "max_input_tokens": 1048576,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 0.000000075,
+        "output_cost_per_token": 0.0000003,
+        "litellm_provider": "openrouter",
+        "mode": "chat"
+      },
+      "openai/typhoon-v2.5-30b-a3b-instruct": {
+        "max_tokens": 8192,
+        "max_input_tokens": 32768,
+        "max_output_tokens": 8192,
+        "input_cost_per_token": 0.00000014,
+        "output_cost_per_token": 0.00000028,
+        "litellm_provider": "openai",
+        "mode": "chat"
+      }
+    };
+    writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), "utf-8");
+    console.log(`[Gateway] Wrote custom Aider model metadata to ${metadataPath}`);
+  } catch (err) {
+    console.error(`[Gateway] Failed to write custom Aider model metadata:`, err);
+  }
+
   // First run or --setup flag: interactive setup wizard
   if (!hasSetupRun() || process.argv.includes("--setup")) {
     await runSetup();
@@ -911,15 +989,16 @@ async function main() {
   }
 
   // Auto-detect AI backends if not already detected
-  if (config.detectedBackends.length === 0) {
-    const detected = detectBackends();
-    if (detected.length > 0) {
-      config.detectedBackends = detected;
-      if (!config.defaultBackend || !detected.includes(config.defaultBackend)) {
-        config.defaultBackend = detected[0];
-      }
-      saveConfig({ detectedBackends: detected, defaultBackend: config.defaultBackend });
+  const detected = detectBackends();
+  if (detected.length > 0) {
+    config.detectedBackends = detected;
+    // Always prioritize gemini-cli as the default if it exists
+    if (detected.includes("gemini-cli")) {
+      config.defaultBackend = "gemini-cli";
+    } else if (!config.defaultBackend || !detected.includes(config.defaultBackend)) {
+      config.defaultBackend = detected[0];
     }
+    saveConfig({ detectedBackends: detected, defaultBackend: config.defaultBackend });
   }
 
   // Register all known backends so any can be selected from the UI.
@@ -929,11 +1008,46 @@ async function main() {
   orc = createOrchestrator({
     workspace: config.defaultWorkspace,
     backends: backendsToUse,
-    defaultBackend: config.defaultBackend,
+    defaultBackendId: config.defaultBackend,
     worktree: { mergeOnComplete: true },
-    retry: { maxRetries: 2, escalateToLeader: true },
+    retry: { maxRetries: 3, escalateToLeader: true },
+    onBackendFailure: (agentId, backendId, error) => {
+      const errStr = typeof error === "string" ? error : JSON.stringify(error);
+      const isKeyOrQuotaError = 
+        errStr.includes("TerminalQuotaError") || 
+        errStr.toLowerCase().includes("quota") || 
+        errStr.toLowerCase().includes("balance") || 
+        errStr.toLowerCase().includes("unauthorized") || 
+        errStr.toLowerCase().includes("leaked") || 
+        errStr.toLowerCase().includes("api_key_invalid") || 
+        errStr.toLowerCase().includes("denied") || 
+        errStr.toLowerCase().includes("forbidden") || 
+        errStr.toLowerCase().includes("401") || 
+        errStr.toLowerCase().includes("402") || 
+        errStr.toLowerCase().includes("403") || 
+        errStr.toLowerCase().includes("400") || 
+        errStr.toLowerCase().includes("invalid key") || 
+        errStr.toLowerCase().includes("invalid_key");
+      
+      if (isKeyOrQuotaError) {
+        console.warn(`[Gateway] Backend failure (auth/quota) detected for ${agentId} (${backendId}): ${errStr}`);
+        keyManager.reportFailure(agentId);
+      }
+    },
+    onBackendCheck: (backendId) => {
+      if (backendId === "gemini" || backendId === "gemini-api") return keyManager.hasAvailableKeys("gemini");
+      if (backendId === "claude" || backendId === "claude-api") return keyManager.hasAvailableKeys("claude");
+      if (backendId === "openai" || backendId === "openai-api") return keyManager.hasAvailableKeys("openai");
+      if (backendId === "openrouter") return keyManager.hasAvailableKeys("openrouter");
+      if (backendId === "deepseek" || backendId === "deepseek-api") return keyManager.hasAvailableKeys("deepseek");
+      if (backendId === "typhoon") return keyManager.hasAvailableKeys("typhoon");
+      if (backendId === "groq") return keyManager.hasAvailableKeys("groq");
+      if (backendId === "mistral") return keyManager.hasAvailableKeys("mistral");
+      return true;
+    },
     promptsDir: path.join(os.homedir(), ".bit-office", "prompts"),
     sandboxMode: config.sandboxMode,
+    useVision: true,
   });
 
   agentDefs = loadAgentDefs();
@@ -1012,33 +1126,49 @@ async function main() {
     "APPROVAL_NEEDED", "SUGGESTION",
   ]);
 
-  // Forward orchestrator events to transport channels
-  const forwardEvent = (event: OrchestratorEvent) => {
-    const mapped = mapOrchestratorEvent(event);
+  // Forward orchestrator events to transport channels via SwarmBus
+  bus.onAny((event: any) => {
+    // If it's already a GatewayEvent (upper-case), it's probably from the gateway itself (ProcessScanner, etc.)
+    if (event.type && /^[A-Z_]+$/.test(event.type)) {
+      if (ARCHIVE_EVENT_TYPES.has(event.type)) bufferEvent(event);
+      publishEvent(event);
+      return;
+    }
+
+    // Otherwise, try mapping it as an OrchestratorEvent
+    const mapped = mapOrchestratorEvent(event as OrchestratorEvent);
     if (mapped) {
+      // Special logic for team phase transitions
+      if (mapped.type === "TEAM_PHASE") {
+        bufferEvent(mapped);
+        persistTeamState();
+
+        if (mapped.phase === "complete") {
+          archiveProject(buildArchiveAgents(), buildArchiveTeam());
+        }
+      }
+
       if (ARCHIVE_EVENT_TYPES.has(mapped.type)) bufferEvent(mapped);
       publishEvent(mapped);
+    } else {
+      // Log unmapped internal events
+      switch (event.type) {
+        case "task:retrying":
+          console.log(`[Retry] Agent ${event.agentId} retrying task ${event.taskId} (attempt ${event.attempt}/${event.maxRetries})`);
+          break;
+        case "worktree:created":
+          console.log(`[Worktree] Created ${event.worktreePath} for agent ${event.agentId}`);
+          break;
+        case "worktree:merged":
+          console.log(`[Worktree] Merged branch ${event.branch} for agent ${event.agentId} (success=${event.success}${event.conflictFiles?.length ? ` conflicts=${event.conflictFiles.join(",")}` : ""})`);
+          break;
+        case "agent:activity":
+          console.log(`[Activity] ${event.agentName} [${event.phase}]: ${event.intent.slice(0, 80)}`);
+          break;
+      }
     }
-  };
+  });
 
-  orc.on("task:started", forwardEvent);
-  orc.on("task:done", forwardEvent);
-  orc.on("task:failed", forwardEvent);
-  orc.on("task:delegated", forwardEvent);
-  orc.on("task:retrying", forwardEvent);
-  orc.on("agent:status", forwardEvent);
-  orc.on("approval:needed", forwardEvent);
-  orc.on("log:append", forwardEvent);
-  orc.on("team:chat", forwardEvent);
-  orc.on("task:queued", forwardEvent);
-  orc.on("worktree:created", forwardEvent);
-  orc.on("worktree:merged", forwardEvent);
-  orc.on("agent:activity", forwardEvent);
-  orc.on("token:update", forwardEvent);
-  orc.on("agent:created", forwardEvent);
-  orc.on("agent:fired", forwardEvent);
-  orc.on("task:result-returned", forwardEvent);
-  orc.on("team:phase", forwardEvent);
 
   // Start external output reader
   outputReader = new ExternalOutputReader();
@@ -1143,7 +1273,10 @@ async function main() {
   openclawAdapter = new OpenClawAdapter(publishEvent);
   openclawAdapter.start();
 
-  const backendNames = config.detectedBackends.map((id) => getBackend(id)?.name ?? id).join(", ");
+  healthMonitor = new SwarmHealthMonitor(orc);
+  healthMonitor.start(30000); // Check every 30s
+
+  const backendNames = config.detectedBackends.map((id: string) => getBackend(id)?.name ?? id).join(", ");
   console.log(`[Gateway] AI backends: ${backendNames || "none detected"} (default: ${getBackend(config.defaultBackend)?.name ?? config.defaultBackend})`);
   console.log(`[Gateway] Permissions: ${config.sandboxMode === "full" ? "Full access" : "Sandbox"}`);
   console.log(`[Gateway] Starting for machine: ${config.machineId}`);
@@ -1183,6 +1316,7 @@ function cleanup() {
   outputReader?.detachAll();
   scanner?.stop();
   openclawAdapter?.stop();
+  healthMonitor?.stop();
   previewServer.stop();
   orc?.destroy();
   destroyTransports();

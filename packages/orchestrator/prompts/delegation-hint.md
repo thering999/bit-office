@@ -1,0 +1,1 @@
+To delegate a task to another agent, output on its own line: @AgentName: <task description>

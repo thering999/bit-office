@@ -106,6 +106,7 @@ export const SaveAgentDefCommand = z.object({
     palette: z.number(),
     isBuiltin: z.boolean(),
     teamRole: z.enum(["dev", "reviewer", "leader"]),
+    avatarUrl: z.string().optional(),
   }),
 });
 
@@ -149,6 +150,41 @@ export const LoadProjectCommand = z.object({
   projectId: z.string(),
 });
 
+export const GetConfigCommand = z.object({
+  type: z.literal("GET_CONFIG"),
+});
+
+export const GetKeyStatusCommand = z.object({
+  type: z.literal("GET_KEY_STATUS"),
+});
+
+export const AssembleSwarmCommand = z.object({
+  type: z.literal("ASSEMBLE_SWARM"),
+  prompt: z.string(),
+});
+
+export const RunDoctorCommand = z.object({
+  type: z.literal("RUN_DOCTOR"),
+});
+
+export const UpdateConfigCommand = z.object({
+  type: z.literal("UPDATE_CONFIG"),
+  config: z.any(),
+});
+
+export const RescueSwarmCommand = z.object({
+  type: z.literal("RESCUE_SWARM"),
+});
+
+export const SyncKnowledgeCommand = z.object({
+  type: z.literal("SYNC_KNOWLEDGE"),
+  projectDir: z.string().optional(),
+});
+
+export const ResetKeysCommand = z.object({
+  type: z.literal("RESET_KEYS"),
+});
+
 export const CommandSchema = z.discriminatedUnion("type", [
   RunTaskCommand,
   ApprovalDecisionCommand,
@@ -172,6 +208,14 @@ export const CommandSchema = z.discriminatedUnion("type", [
   RateProjectCommand,
   ListProjectsCommand,
   LoadProjectCommand,
+  GetConfigCommand,
+  GetKeyStatusCommand,
+  UpdateConfigCommand,
+  AssembleSwarmCommand,
+  RunDoctorCommand,
+  RescueSwarmCommand,
+  SyncKnowledgeCommand,
+  ResetKeysCommand,
 ]);
 
 export type RunTaskCommand = z.infer<typeof RunTaskCommand>;
@@ -196,4 +240,12 @@ export type SuggestCommand = z.infer<typeof SuggestCommand>;
 export type RateProjectCommand = z.infer<typeof RateProjectCommand>;
 export type ListProjectsCommand = z.infer<typeof ListProjectsCommand>;
 export type LoadProjectCommand = z.infer<typeof LoadProjectCommand>;
+export type GetConfigCommand = z.infer<typeof GetConfigCommand>;
+export type GetKeyStatusCommand = z.infer<typeof GetKeyStatusCommand>;
+export type UpdateConfigCommand = z.infer<typeof UpdateConfigCommand>;
+export type AssembleSwarmCommand = z.infer<typeof AssembleSwarmCommand>;
+export type RunDoctorCommand = z.infer<typeof RunDoctorCommand>;
+export type RescueSwarmCommand = z.infer<typeof RescueSwarmCommand>;
+export type SyncKnowledgeCommand = z.infer<typeof SyncKnowledgeCommand>;
+export type ResetKeysCommand = z.infer<typeof ResetKeysCommand>;
 export type Command = z.infer<typeof CommandSchema>;

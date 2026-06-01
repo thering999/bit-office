@@ -3,6 +3,17 @@ import type { AgentSession } from "./agent-session.js";
 export class AgentManager {
   private agents = new Map<string, AgentSession>();
   private _teamLeadId: string | null = null;
+  private _chatLog: Array<{ from: string; message: string; type: string; timestamp: number }> = [];
+
+  pushChat(from: string, message: string, type: string) {
+    this._chatLog.push({ from, message, type, timestamp: Date.now() });
+    if (this._chatLog.length > 15) this._chatLog.shift();
+  }
+
+  getChatLog(): string {
+    if (this._chatLog.length === 0) return "No recent team activity.";
+    return this._chatLog.map(c => `[${new Date(c.timestamp).toLocaleTimeString()}] ${c.from} (${c.type}): ${c.message}`).join("\n");
+  }
 
   setTeamLead(id: string | null) {
     this._teamLeadId = id;
@@ -76,5 +87,20 @@ export class AgentManager {
       }
     }
     return fallback;
+  }
+
+  /**
+   * Emergency rescue: Resets all agents, clears stuck sessions, 
+   * and potentially switches their backend to a stable default (Gemini).
+   */
+  rescueAll(stableBackendId: string): void {
+    console.log(`[AgentManager] EMERGENCY RESCUE: Resetting all agents to ${stableBackendId}...`);
+    for (const session of this.agents.values()) {
+      session.destroy(); // Kill process
+      session.clearHistory(); // Clear history
+      // We don't have direct access to private backend field, but we can clear it
+      // so it uses the orchestrator's default next time it starts.
+      session.setStatus("idle");
+    }
   }
 }

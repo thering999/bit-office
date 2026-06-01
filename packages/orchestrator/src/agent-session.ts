@@ -1,5 +1,6 @@
 import { spawn, execSync, type ChildProcess } from "child_process";
 import path from "path";
+import { StringDecoder } from "string_decoder";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { homedir } from "os";
 import { CONFIG } from "./config.js";
@@ -10,6 +11,12 @@ import type { AIBackend } from "./ai-backend.js";
 import type { AgentStatus, TaskResultPayload, OrchestratorEvent } from "./types.js";
 import type { TemplateName } from "./prompt-templates.js";
 import { getMemoryContext } from "./memory.js";
+import { vectorMemory } from "./vector-memory.js";
+import { knowledgeManager } from "./knowledge-manager.js";
+import { AgentErrorHandler } from "./error-handler.js";
+import { SnapshotManager } from "./snapshot-manager.js";
+import { blackboard } from "./blackboard.js";
+
 
 /* ── Persist session IDs across restarts ────────────────────────── */
 const SESSION_FILE = path.join(homedir(), ".bit-office", "agent-sessions.json");
@@ -59,7 +66,10 @@ interface QueuedTask {
   prompt: string;
   repoPath?: string;
   teamContext?: string;
+  teamChat?: string;
   phaseOverride?: string;
+  imagePath?: string;
+  visualContext?: string;
 }
 
 export interface AgentSessionOpts {
@@ -78,6 +88,8 @@ export interface AgentSessionOpts {
   teamId?: string;
   /** Memory context to inject into prompts (from previous projects) */
   memoryContext?: string;
+  /** Whether this agent should use vision (e.g. screenshots of current state) */
+  useVision?: boolean;
 }
 
 export class AgentSession {
@@ -85,22 +97,26 @@ export class AgentSession {
   readonly name: string;
   readonly role: string;
   readonly personality: string;
-  readonly backend: AIBackend;
+  backend: AIBackend;
   palette?: number;
   private process: ChildProcess | null = null;
   private currentTaskId: string | null = null;
   private taskTimeout: ReturnType<typeof setTimeout> | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastPrompt: string = "";
   private currentCwd: string | null = null;
   private _status: AgentStatus = "idle";
   get status(): AgentStatus { return this._status; }
   private pendingApprovals = new Map<string, PendingApproval>();
   private workspace: string;
+  private _lastLogLine: string = "";
+  get lastLogLine(): string { return this._lastLogLine; }
   private sandboxMode: "full" | "safe";
   private stdoutBuffer = "";
   private stderrBuffer = "";
   private taskInputTokens = 0;
   private taskOutputTokens = 0;
+  private fixRoundCount = 0;
   /** Dedup same-turn repeated usage in assistant messages */
   private lastUsageSignature = "";
   private hasHistory: boolean;
@@ -109,6 +125,12 @@ export class AgentSession {
   private onEvent: (event: OrchestratorEvent) => void;
   private _renderPrompt: (templateName: TemplateName, vars: Record<string, string | undefined>) => string;
   private timedOut = false;
+  private wasInactivityTimeout = false;
+  private currentTool: string | null = null;
+
+  private inactivityTimeout: ReturnType<typeof setTimeout> | null = null;
+  private healthCheckInterval: ReturnType<typeof setInterval> | null = null;
+  private _lastHealthActivity: number = Date.now();
   private _isTeamLead: boolean;
   private _memoryContext: string;
   /** Whether this leader has already been through execute phase at least once */
@@ -117,9 +139,20 @@ export class AgentSession {
   /** Original user-facing task prompt (for leader state-summary mode) */
   originalTask: string | null = null;
   onDelegation: DelegationHandler | null = null;
+  private pendingDelegation: { targetName: string; lines: string[] } | null = null;
+  
+  private flushDelegation() {
+    if (this.pendingDelegation && this.onDelegation) {
+      const fullPrompt = this.pendingDelegation.lines.join("\n").replace(/\*\*$/, "").trim();
+      console.log(`[Delegation detected] ${this.name} -> @${this.pendingDelegation.targetName}: ${fullPrompt.slice(0, 120)}`);
+      this.onDelegation(this.agentId, this.pendingDelegation.targetName, fullPrompt);
+    }
+    this.pendingDelegation = null;
+  }
+
   onTaskComplete: TaskCompleteHandler | null = null;
   /** Whether the last failure was a timeout (not retryable) */
-  get wasTimeout(): boolean { return this.timedOut; }
+  get wasTimeout(): boolean { return this.timedOut || this.wasInactivityTimeout; }
   get isTeamLead(): boolean { return this._isTeamLead; }
   /** Mark that this leader has already been through execute phase (for restart recovery). */
   set hasExecuted(v: boolean) { this._hasExecuted = v; }
@@ -131,7 +164,10 @@ export class AgentSession {
   get lastFullOutput(): string | null { return this._lastFullOutput; }
   set isTeamLead(v: boolean) { this._isTeamLead = v; }
   /** Current phase override for team collaboration phases */
+  /** Current phase override for team collaboration phases */
   currentPhase: string | null = null;
+  /** Whether vision is enabled for this session */
+  useVision = false;
 
   /** Current working directory of the running task (used by worktree logic) */
   get currentWorkingDir(): string | null { return this.currentCwd; }
@@ -147,6 +183,10 @@ export class AgentSession {
   worktreePath: string | null = null;
   worktreeBranch: string | null = null;
   teamId?: string;
+  private snapshotManager: SnapshotManager;
+  private currentSnapshot: string | null = null;
+  /** Whether this session has autonomously failed over to a backup backend */
+  public isFailover = false;
 
   constructor(opts: AgentSessionOpts) {
     this.agentId = opts.agentId;
@@ -163,9 +203,23 @@ export class AgentSession {
     this._memoryContext = opts.memoryContext ?? "";
     this.onEvent = opts.onEvent;
     this._renderPrompt = opts.renderPrompt;
+    this.useVision = opts.useVision ?? false;
+    this.snapshotManager = new SnapshotManager();
   }
 
-  async runTask(taskId: string, prompt: string, repoPath?: string, teamContext?: string, isUserInitiated = false, phaseOverride?: string) {
+
+  /** Update the backend for this session (used for failover) */
+  setBackend(backend: AIBackend) {
+    console.log(`[Agent ${this.name}] Switching backend from ${this.backend.id} to ${backend.id}`);
+    this.backend = backend;
+    this.isFailover = true;
+  }
+
+  incrementFixRound() {
+    this.fixRoundCount++;
+  }
+
+  async runTask(taskId: string, prompt: string, repoPath?: string, teamContext?: string, teamChat?: string, isUserInitiated = false, phaseOverride?: string, imagePath?: string, visualContext?: string) {
     // If the user explicitly cancelled this agent, block any automatic restarts
     // (from flushResults, delegation, retry). Only a direct user action clears this.
     if (this._userCancelled && !isUserInitiated) {
@@ -174,11 +228,26 @@ export class AgentSession {
     }
     if (isUserInitiated) {
       this._userCancelled = false;
+      this.fixRoundCount = 0;
+    }
+
+    // Safety: prevent infinite fix loops
+    if (!isUserInitiated && this.fixRoundCount >= 3) {
+      console.log(`[Agent ${this.name}] Blocking task restart — max fix rounds (3) reached`);
+      this.onEvent({
+        type: "team:chat",
+        fromAgentId: this.agentId,
+        message: "I've tried fixing this 3 times but it's still not right. Stopping to avoid infinite loop. Please check the logs.",
+        messageType: "status",
+        timestamp: Date.now()
+      });
+      this.setStatus("error");
+      return;
     }
 
     if (this.process) {
       const position = this.taskQueue.length + 1;
-      this.taskQueue.push({ taskId, prompt, repoPath, teamContext, phaseOverride });
+      this.taskQueue.push({ taskId, prompt, repoPath, teamContext, teamChat, phaseOverride, imagePath, visualContext });
       this.onEvent({
         type: "task:queued",
         agentId: this.agentId,
@@ -192,15 +261,19 @@ export class AgentSession {
     // Cancel any pending idle timer from a previous task
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
 
+    this.lastPrompt = prompt;
     this.currentTaskId = taskId;
     this.currentPhase = phaseOverride ?? null;
     const cwd = repoPath ?? this.workspace;
+    let cmd = this.backend.command;
     this.currentCwd = cwd;
     this.stdoutBuffer = "";
     this.stderrBuffer = "";
     this.taskInputTokens = 0;
     this.taskOutputTokens = 0;
     this.lastUsageSignature = "";
+    this.currentSnapshot = await this.snapshotManager.createSnapshot(cwd, taskId);
+
 
     this.onEvent({
       type: "task:started",
@@ -209,10 +282,10 @@ export class AgentSession {
       prompt,
     });
 
-    this.setStatus("working");
+    this.setStatus("thinking");
 
     try {
-      const cleanEnv = { ...process.env };
+      const cleanEnv = { ...process.env, ...(this.backend.getEnv?.(this.agentId) ?? {}) };
       for (const key of this.backend.deleteEnv ?? []) {
         delete cleanEnv[key];
       }
@@ -226,11 +299,14 @@ export class AgentSession {
         role: this._isTeamLead ? "Team Lead" : this.role,
         personality: this.personality ? `${this.personality}` : "",
         teamRoster: teamContext ?? "",
+        teamChat: teamChat ?? "",
         originalTask,
         prompt,
-        memory: this._memoryContext || getMemoryContext(),
+        memory: this._memoryContext ? `${this._memoryContext}\n\n${await this.getEnhancedMemoryContext(prompt)}` : await this.getEnhancedMemoryContext(prompt),
+        blackboard: blackboard.getStateSummary(),
         soloHint: this.teamId ? "" : `- You are a SOLO developer. Do NOT delegate, assign tasks, or mention other team members. Do ALL the work yourself.
 - PROJECT DIRECTORY: When creating files, first create a dedicated project directory (short kebab-case name, e.g. "snake-game"). Do ALL work inside it. Report it as PROJECT_DIR: <directory-name> in your output. If the user is just chatting (no code needed), skip this.`,
+        visualContext: visualContext ?? "",
       };
       // Capture before template selection modifies it
       const isFirstExecute = this._isTeamLead && phaseOverride === "execute" && !this._hasExecuted;
@@ -248,7 +324,8 @@ export class AgentSession {
         if (phaseOverride === "execute") this._hasExecuted = true;
       } else {
         const workerInitial = this.role.toLowerCase().includes("review") ? "worker-reviewer-initial" : "worker-initial";
-        fullPrompt = this._renderPrompt(this.hasHistory ? "worker-continue" : workerInitial, templateVars);
+        const templateName = this.hasHistory ? "worker-continue" : workerInitial;
+        fullPrompt = this._renderPrompt(this.useVision ? `${templateName}-vision` as any : templateName, templateVars);
       }
       const fullAccess = this.sandboxMode === "full";
       const verbose = !!process.env.DEBUG;
@@ -261,22 +338,48 @@ export class AgentSession {
         // Only skip resume on first execute (to shed conversational create/design context).
         // On subsequent runs (result forwarding, user feedback), resume so leader keeps context.
         skipResume: isFirstExecute && this.hasHistory,
+        imagePath,
       });
 
+      const isWin = process.platform === "win32";
+      console.log(`[Agent ${this.name}] PATH: ${cleanEnv.PATH || cleanEnv.Path || "NOT FOUND"}`);
       // Log which binary + env state
       try {
-        const whichPath = execSync(`which ${this.backend.command}`, { env: cleanEnv, encoding: "utf-8", timeout: 3000 }).trim();
-        console.log(`[Agent ${this.name}] Binary: ${whichPath}, CLAUDECODE=${cleanEnv.CLAUDECODE ?? "unset"}, ENTRYPOINT=${cleanEnv.CLAUDE_CODE_ENTRYPOINT ?? "unset"}`);
+        if (!path.isAbsolute(this.backend.command)) {
+          const whichCmd = isWin ? 'where' : 'which';
+          const whichPath = execSync(`${whichCmd} ${this.backend.command}`, { env: cleanEnv, encoding: "utf-8", timeout: 3000 }).split('\n')[0].trim();
+          console.log(`[Agent ${this.name}] Binary found at: ${whichPath}`);
+        }
       } catch { /* ignore */ }
       console.log(`[Agent ${this.name}] Spawning: ${this.backend.command} ${args.map(a => a.length > 80 ? a.slice(0, 80) + '...' : a).join(' ')}`);
 
       // stdin MUST be "ignore" — "pipe" causes Claude Code to hang waiting for input
       // detached: true creates a new process group so we can kill the entire tree on cancel
-      this.process = spawn(this.backend.command, args, {
+      cmd = this.backend.command;
+      let useShell = false;
+
+      if (isWin) {
+        if (cmd === "node") cmd = process.execPath;
+        
+        if (path.isAbsolute(cmd)) {
+          useShell = false; // Absolute paths work best without shell on Windows
+        } else {
+          useShell = true; // Bare commands (e.g. 'git') often need shell to find the .exe/.cmd
+        }
+
+        // Quote if using shell and has spaces
+        if (useShell && cmd.includes(" ") && !cmd.startsWith("\"")) {
+          cmd = `"${cmd}"`;
+        }
+      }
+
+      console.log(`[Agent ${this.name}] Final Spawn: ${cmd} (shell: ${useShell})`);
+      this.process = spawn(cmd, args, {
         cwd,
         env: cleanEnv,
-        stdio: ["ignore", "pipe", "pipe"],
-        detached: true,
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: !isWin, 
+        shell: useShell,
       });
 
       // Task timeout: only for team members (prevent blocking the team flow).
@@ -295,66 +398,188 @@ export class AgentSession {
         }, TASK_TIMEOUT_MS);
       }
 
-      // Delegation detection regex
-      const DELEGATION_RE = /^\s*(?:[-*>]\s*)?(?:\*\*)?@(\w+)(?:\*\*)?:\s*(.+)$/;
-
-      // Filter out system/diagnostic noise that should not appear in the UI
-      const isSystemNoise = (line: string): boolean => {
-        const t = line.trim().toLowerCase();
-        if (!t) return true;
-        // MCP-related
-        if (t.includes("mcp") && (t.startsWith("[") || t.includes("server") || t.includes("connect") || t.includes("tool"))) return true;
-        // Claude Code internal diagnostics
-        if (/^\s*>?\s*(fetching|loaded|reading|writing|searching|running|executing|checking)\s/i.test(line)) return true;
-        // Progress indicators / spinners
-        if (/^[\s⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✓✗•·…\-]+$/.test(line.trim())) return true;
-        // Bare file path lines (no sentence content)
-        if (/^\s*[\w./\\-]+\.(ts|tsx|js|jsx|json|md|css|py)\s*$/.test(line)) return true;
-        return false;
-      };
-
-      // Accumulator for multi-line delegations (e.g. @Kai: Fix bugs:\n1. bug one\n2. bug two)
-      let pendingDelegation: { targetName: string; lines: string[] } | null = null;
-
-      const flushDelegation = () => {
-        if (pendingDelegation && this.onDelegation) {
-          const fullPrompt = pendingDelegation.lines.join("\n").replace(/\*\*$/, "").trim();
-          console.log(`[Delegation detected] ${this.name} -> @${pendingDelegation.targetName}: ${fullPrompt.slice(0, 120)}`);
-          this.onDelegation(this.agentId, pendingDelegation.targetName, fullPrompt);
+      this.wasInactivityTimeout = false;
+      const resetInactivityTimer = () => {
+        if (this.inactivityTimeout) clearTimeout(this.inactivityTimeout);
+        if (CONFIG.timing.inactivityTimeoutMs > 0) {
+          this.inactivityTimeout = setTimeout(() => {
+            if (this.process?.pid) {
+              console.log(`[Agent ${this.agentId}] Inactivity timeout (${CONFIG.timing.inactivityTimeoutMs / 1000}s), killing`);
+              this.wasInactivityTimeout = true;
+              try { process.kill(-this.process.pid, "SIGKILL"); } catch { this.process.kill("SIGKILL"); }
+            }
+          }, CONFIG.timing.inactivityTimeoutMs);
         }
-        pendingDelegation = null;
       };
+      resetInactivityTimer();
+      
+      this._lastHealthActivity = Date.now();
+      if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = setInterval(() => {
+        if (this.process && (this._status === "working" || this._status === "thinking" || this._status === "coding" || this._status === "searching" || this._status === "testing")) {
+          const inactiveMs = Date.now() - this._lastHealthActivity;
+          
+          if (inactiveMs > 90_000) { // 90 seconds of total silence = HUNG
+            console.log(`[Agent ${this.agentId}] Non-responsive for 90s, marking as HUNG`);
+            this.setStatus("error", "Non-responsive (HUNG). Consider restarting or failing over.");
+            this.onEvent({
+              type: "task:failed",
+              agentId: this.agentId,
+              taskId: this.currentTaskId ?? "unknown",
+              error: "Agent became non-responsive (HUNG) during execution. [Thai: เอเจนท์หยุดค้าง ไม่ตอบสนอง]",
+              rawError: "HUNG_TIMEOUT"
+            });
+            // Kill the process so it can be retried
+            const pgid = this.process.pid;
+            try { if (pgid) process.kill(-pgid, "SIGKILL"); } catch { this.process.kill("SIGKILL"); }
+          } else if (inactiveMs > 30_000) { // 30 seconds of no logs while working
+            this.onEvent({
+              type: "agent:activity",
+              agentId: this.agentId,
+              agentName: this.name,
+              phase: "health",
+              intent: "Still working, but no output for 30s. Process might be slow or hanging.",
+            });
+          }
+        }
+      }, 15_000);
+
+      // Delegation detection regex — support both @Name: and @Name <space>
+      const DELEGATION_RE = /^\s*(?:[-*>]\s*)?(?:\*\*)?@(\w+)(?:[,:]\s*|\s+)(.+)$/;
+      const CHAT_RE = /^\s*(?:[-*>]\s*)?(?:\*\*)?@Team(?:[,:]\s*|\s+)(.+)$/i;
 
       // Handle a line of plain text output (delegation detection + logging)
       const handleTextLine = (text: string) => {
+        this._lastHealthActivity = Date.now();
         const lines = text.split("\n").filter((l) => l.trim());
         const visibleLines: string[] = [];
         for (const line of lines) {
           const trimmed = line.trim();
           console.log(`[Agent ${this.name}] ${trimmed.slice(0, 200)}`);
-          const match = this._isTeamLead ? trimmed.match(DELEGATION_RE) : null;
-          if (match) {
-            // Flush any previous delegation before starting a new one
-            flushDelegation();
-            const [, targetName, delegatedPrompt] = match;
-            pendingDelegation = { targetName, lines: [delegatedPrompt] };
-          } else if (pendingDelegation) {
-            // Continuation line of current delegation
-            pendingDelegation.lines.push(trimmed);
+          
+          const chatMatch = trimmed.match(CHAT_RE);
+          const talkToTeamMatch = trimmed.match(/^TALK_TO_TEAM:\s*(.+)$/i);
+          
+          // Blackboard update patterns
+          const taskPattern = trimmed.match(/^TASK:\s*(.+)$/i);
+          const insightPattern = trimmed.match(/^INSIGHT:\s*(.+)$/i);
+          const blockerPattern = trimmed.match(/^BLOCKER:\s*(.+)$/i);
+
+          if (taskPattern) blackboard.post({ type: "task", content: taskPattern[1], author: this.name, status: "pending" });
+          if (insightPattern) blackboard.post({ type: "insight", content: insightPattern[1], author: this.name, status: "completed" });
+          if (blockerPattern) {
+            blackboard.post({ type: "blocker", content: blockerPattern[1], author: this.name, status: "pending" });
+            this.onEvent({
+              type: "agent:talk" as any,
+              agentId: this.agentId,
+              target: "team",
+              message: `BLOCKER DETECTED: ${blockerPattern[1]}`
+            });
           }
+
+          if (chatMatch || talkToTeamMatch) {
+            this.flushDelegation();
+            const message = (chatMatch?.[1] ?? talkToTeamMatch?.[1])!;
+            this.onEvent({
+              type: "team:chat",
+              fromAgentId: this.agentId,
+              message,
+              messageType: "briefing",
+              timestamp: Date.now(),
+            });
+            // Immediate talk for automation
+            this.onEvent({
+              type: "agent:talk" as any,
+              agentId: this.agentId,
+              target: "team",
+              message
+            });
+            this.setStatus("collaborating", `Broadcasting to team: ${message.slice(0, 50)}...`);
+          }
+
+          const match = (this._isTeamLead || this.teamId) ? trimmed.match(DELEGATION_RE) : null;
+          if (match) {
+            // If we were already building a delegation, flush it first
+            if (this.pendingDelegation && this.pendingDelegation.targetName !== match[1]) {
+              this.flushDelegation();
+            }
+
+            const [, targetName, delegatedPrompt] = match;
+            if (!this.pendingDelegation) {
+              this.pendingDelegation = { targetName, lines: [delegatedPrompt] };
+            } else {
+              this.pendingDelegation.lines.push(delegatedPrompt);
+            }
+            
+            // Immediate notification for the UI/Orchestrator
+            this.onEvent({
+              type: "agent:talk" as any,
+              agentId: this.agentId,
+              target: targetName,
+              message: delegatedPrompt
+            });
+            this.setStatus("collaborating", `Talking to ${targetName}...`);
+          } else if (this.pendingDelegation) {
+            // Is this a continuation of the current delegation?
+            // We consider it a continuation if it's not a field or a new delegation
+            const isField = /^(STATUS|ENTRY_FILE|PREVIEW_CMD|PREVIEW_PORT|SUMMARY|FILES_CHANGED|PROJECT_DIR|MODULES|FEATURES):/i.test(trimmed);
+            const isPlanTag = /^\[\/?PLAN\]/i.test(trimmed);
+            
+            if (!isField && !isPlanTag) {
+              this.pendingDelegation.lines.push(trimmed);
+            } else {
+              this.flushDelegation();
+            }
+          }
+
+
+          // Tool call detection (MCP / Claude Code / Aider)
+          if (trimmed.includes("Calling tool:") || (trimmed.startsWith("mcp") && (trimmed.includes("calling") || trimmed.includes("tool")))) {
+            const toolMatch = trimmed.match(/tool:?\s*([\w-]+)/i);
+            const toolName = toolMatch ? toolMatch[1].toLowerCase() : "unknown";
+            this.currentTool = toolName;
+            this.onEvent({
+              type: "tool:started",
+              agentId: this.agentId,
+              taskId,
+              tool: toolName,
+            });
+            
+            // Set granular status based on tool type
+            if (["grep", "ls", "find", "read", "smart", "summary", "read_grep", "list_dir", "view_file"].some(t => toolName.includes(t))) {
+              this.setStatus("searching");
+            } else if (["test", "vitest", "jest", "playwright", "cypress", "mocha"].some(t => toolName.includes(t))) {
+              this.setStatus("testing");
+            } else {
+              this.setStatus("coding");
+            }
+          } else if (trimmed.includes("Tool response:") || trimmed.includes("Finished tool:")) {
+            this.onEvent({
+              type: "tool:finished",
+              agentId: this.agentId,
+              taskId,
+              tool: this.currentTool || "unknown",
+              success: !trimmed.toLowerCase().includes("error"),
+            });
+            this.currentTool = null;
+            this.setStatus("thinking");
+          }
+
           if (!isSystemNoise(line)) {
             visibleLines.push(trimmed);
+            this._lastLogLine = trimmed;
+            // Update status details for real-time Thought Stream tooltips
+            this.setStatus(this._status, trimmed);
           }
         }
-        // Flush at end of text block (covers single-delegation and last-delegation cases)
-        flushDelegation();
+        
         if (visibleLines.length > 0) {
           this.onEvent({
             type: "log:append",
             agentId: this.agentId,
             taskId,
             stream: "stdout",
-            chunk: visibleLines.slice(-3).join("\n"),
+            chunk: visibleLines.join("\n"),
           });
         }
       };
@@ -363,8 +588,11 @@ export class AgentSession {
       let jsonLineBuf = "";
       let stdoutChunkCount = 0;
       let seenFirstJson = false;
+      const stdoutDecoder = new StringDecoder("utf8");
+
       this.process.stdout?.on("data", (data: Buffer) => {
-        const raw = data.toString();
+        resetInactivityTimer();
+        const raw = stdoutDecoder.write(data);
         stdoutChunkCount++;
         if (stdoutChunkCount <= 3) {
           console.log(`[Agent ${this.name} raw-stdout #${stdoutChunkCount}] ${raw.slice(0, 150)}`);
@@ -388,38 +616,50 @@ export class AgentSession {
                 this.sessionId = msg.session_id;
                 console.log(`[Agent ${this.name}] Session ID: ${msg.session_id}`);
               }
-              if (msg.type === "assistant" && msg.message?.content) {
-                // Live token usage from per-turn usage (dedup same-turn repeats)
-                if (msg.message.usage) {
-                  const usage = msg.message.usage;
-                  const turnIn = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
-                  const turnOut = usage.output_tokens ?? 0;
-                  const sig = `${turnIn}:${turnOut}`;
-                  if (sig !== this.lastUsageSignature) {
-                    this.lastUsageSignature = sig;
-                    this.taskInputTokens += turnIn;
-                    this.taskOutputTokens += turnOut;
-                    this.onEvent({
-                      type: "token:update",
-                      agentId: this.agentId,
-                      inputTokens: this.taskInputTokens,
-                      outputTokens: this.taskOutputTokens,
-                    });
+              if ((msg.type === "assistant" || msg.type === "message") && (msg.message?.content || msg.content)) {
+                const role = msg.role || msg.message?.role || "assistant";
+                if (msg.type === "message" && role !== "assistant") {
+                  // Skip non-assistant messages (e.g. user echo)
+                } else {
+                  // Live token usage from per-turn usage (dedup same-turn repeats)
+                  const usage = msg.usage || msg.message?.usage;
+                  if (usage) {
+                    const turnIn = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+                    const turnOut = usage.output_tokens ?? 0;
+                    const sig = `${turnIn}:${turnOut}`;
+                    if (sig !== this.lastUsageSignature) {
+                      this.lastUsageSignature = sig;
+                      this.taskInputTokens += turnIn;
+                      this.taskOutputTokens += turnOut;
+                      this.onEvent({
+                        type: "token:update",
+                        agentId: this.agentId,
+                        inputTokens: this.taskInputTokens,
+                        outputTokens: this.taskOutputTokens,
+                      });
+                    }
                   }
-                }
-                for (const block of msg.message.content) {
-                  if (block.type === "text" && block.text) {
-                    this.stdoutBuffer += block.text + "\n";
-                    handleTextLine(block.text);
-                  }
-                  if (block.type === "thinking" && block.thinking) {
-                    console.log(`[Agent ${this.name} thinking] ${block.thinking.slice(0, 120)}...`);
+
+                  const content = msg.content || msg.message?.content;
+                  if (typeof content === "string") {
+                    this.stdoutBuffer += content + "\n";
+                    handleTextLine(content);
+                  } else if (Array.isArray(content)) {
+                    for (const block of content) {
+                      if (block.type === "text" && block.text) {
+                        this.stdoutBuffer += block.text + "\n";
+                        handleTextLine(block.text);
+                      }
+                      if (block.type === "thinking" && block.thinking) {
+                        console.log(`[Agent ${this.name} thinking] ${block.thinking.slice(0, 120)}...`);
+                      }
+                    }
                   }
                 }
               } else if (msg.type === "result") {
-                // Result message: authoritative session total from msg.usage
-                if (msg.usage) {
-                  const usage = msg.usage;
+                // Result message: authoritative session total from msg.usage or msg.stats
+                const usage = msg.usage || msg.stats;
+                if (usage) {
                   const totalIn = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
                   const totalOut = usage.output_tokens ?? 0;
                   // Replace live accumulation with authoritative total
@@ -458,13 +698,15 @@ export class AgentSession {
         }
       });
 
+      const stderrDecoder = new StringDecoder("utf8");
       this.process.stderr?.on("data", (data: Buffer) => {
-        const chunk = data.toString();
-        this.stderrBuffer += chunk;
+        resetInactivityTimer();
+        const raw = stderrDecoder.write(data);
+        this.stderrBuffer += raw;
         // Log to console for debugging, but do NOT forward stderr to the UI.
         // Stderr is MCP internals, system diagnostics, and Claude Code infrastructure —
         // none of it is meaningful agent output for the user.
-        for (const line of chunk.split("\n")) {
+        for (const line of raw.split("\n")) {
           if (line.trim()) console.log(`[Agent ${this.name} stderr] ${line.slice(0, 200)}`);
         }
       });
@@ -473,6 +715,8 @@ export class AgentSession {
         const agentPid = this.process?.pid;
         this.process = null;
         if (this.taskTimeout) { clearTimeout(this.taskTimeout); this.taskTimeout = null; }
+        if (this.inactivityTimeout) { clearTimeout(this.inactivityTimeout); this.inactivityTimeout = null; }
+        if (this.healthCheckInterval) { clearInterval(this.healthCheckInterval); this.healthCheckInterval = null; }
 
         // Kill the agent's process group to clean up any orphan child processes
         // (e.g., dev servers the agent may have started despite prompt instructions)
@@ -520,6 +764,9 @@ export class AgentSession {
 
         console.log(`[Agent ${this.agentId}] ${this.backend.name} exited: code=${code}, cancelled=${wasCancelled}, stdout=${this.stdoutBuffer.length}ch`);
 
+        // Ensure any pending delegation is flushed on exit
+        this.flushDelegation();
+
         try {
           if (wasCancelled) {
             // Already handled in cancelTask() — just clean up and dequeue
@@ -529,8 +776,44 @@ export class AgentSession {
             this.hasHistory = true;
             saveSessionId(this.agentId, this.sessionId);
 
-            const { summary, fullOutput, changedFiles, entryFile, projectDir, previewCmd, previewPort } = this.extractResult();
+            const result = this.extractResult();
+            const { summary, fullOutput, changedFiles, entryFile, projectDir, previewCmd, previewPort, modules, features } = result;
             this._lastFullOutput = fullOutput;
+
+            // Check for empty answer (stuck/silent failure)
+            if (!fullOutput.trim() && changedFiles.length === 0) {
+              if (this.fixRoundCount < 1) {
+                console.log(`[Agent ${this.name}] Detected empty response. Forcing breakthrough reasoning...`);
+                this.incrementFixRound();
+                const breakthroughPrompt = `## BREAKTHROUGH REASONING REQUIRED
+Your last response was empty. This is unacceptable. 
+You MUST provide a clear, actionable response now. 
+
+If you are stuck, describe the obstacle and ask the team for help. 
+If you are ready to work, use your tools (ls, grep, write_file) to proceed.`;
+                
+                // Switch to reasoning model for breakthrough if possible
+                // We'll let the next runTask pick the best available
+                setTimeout(() => this.runTask(completedTaskId, breakthroughPrompt), 500);
+                return;
+              }
+              throw new Error("AI did not provide any answer (Empty Response).");
+            }
+
+            // Automatically document successful work for project knowledge base (NotebookLM)
+            // Skip for team leads (they don't implement features) or trivial chats
+            if (!this._isTeamLead && (modules?.length || features?.length || changedFiles.length > 0)) {
+              knowledgeManager.documentWork({
+                agentName: this.name,
+                role: this.role,
+                taskId: completedTaskId,
+                projectDir: projectDir || this.teamId || "default",
+                summary: summary,
+                modules: modules || [],
+                features: features || [],
+                timestamp: Date.now()
+              }).catch(err => console.warn(`[Agent ${this.name}] Knowledge doc failed:`, err));
+            }
 
             // Preview detection: skip for team leads (they don't create files).
             // Leader preview is handled by the orchestrator when isFinalResult is set.
@@ -547,11 +830,12 @@ export class AgentSession {
             const tokenUsage = (this.taskInputTokens > 0 || this.taskOutputTokens > 0)
               ? { inputTokens: this.taskInputTokens, outputTokens: this.taskOutputTokens }
               : undefined;
+
             this.onEvent({
               type: "task:done",
               agentId: this.agentId,
               taskId: completedTaskId,
-              result: { summary, fullOutput, changedFiles, diffStat: "", testResult: "unknown", previewUrl, previewPath, entryFile, projectDir, previewCmd, previewPort, tokenUsage },
+              result: { summary, fullOutput, changedFiles, diffStat: "", testResult: "unknown", previewUrl, previewPath, entryFile, projectDir, previewCmd, previewPort, tokenUsage, modules, features },
             });
             this.onTaskComplete?.(this.agentId, completedTaskId, summary, true, fullOutput);
             this.idleTimer = setTimeout(() => { this.idleTimer = null; this.setStatus("idle"); }, CONFIG.timing.idleDoneDelayMs);
@@ -567,17 +851,42 @@ export class AgentSession {
             // Extract meaningful error lines from stderr (e.g. "ERROR: You've hit your usage limit...")
             const stderrErrorLines = this.stderrBuffer
               .split("\n")
-              .filter((l) => /^\s*(ERROR|error|Error)[:\s]/i.test(l))
+              .filter((l) => 
+                /TerminalQuotaError|RateLimitError|quota|limit|invalid_api_key|overloaded|429|code: 429/i.test(l) || 
+                /Cannot find module|ENOENT|not found/i.test(l) ||
+                /^\s*(ERROR|error|Error)[:\s]/i.test(l)
+              )
               .map((l) => l.trim());
             const stderrError = stderrErrorLines[stderrErrorLines.length - 1] ?? "";
-            const errorMsg = stderrError || this.stdoutBuffer.slice(0, 300) || this.stderrBuffer.slice(-300) || `Process exited with code ${code}`;
-            this._lastResult = `failed: ${errorMsg.slice(0, 120)}`;
+            
+            const rawError = this.wasInactivityTimeout ? "Task hung: Inactivity timeout (no output for too long)"
+                           : this.timedOut ? `Task timed out after ${CONFIG.timing.workerTimeoutMs / 1000}s`
+                           : stderrError || this.stdoutBuffer.slice(0, 300) || this.stderrBuffer.slice(-300) || `Process exited with code ${code}`;
+            
+            // Check for Quota/Rate Limit/Balance/Server Busy errors to trigger immediate failover
+            if (/quota|limit|rate.*limit|429|balance|402|503|high demand/i.test(rawError)) {
+              console.log(`[Agent ${this.name}] Quota/Balance/Server Busy detected. Requesting failover...`);
+              this.onEvent({
+                type: "agent:talk" as any,
+                agentId: this.agentId,
+                target: "orchestrator",
+                message: "FAILOVER_REQUEST: QUOTA_EXCEEDED"
+              });
+            }
+
+            // Translate to Thai for the user
+            const errorMsg = AgentErrorHandler.formatThai(rawError, { command: cmd, agentId: this.agentId });
+            
+
+            
+            this._lastResult = `failed: ${rawError.slice(0, 120)}`;
             this.setStatus("error");
             this.onEvent({
               type: "task:failed",
               agentId: this.agentId,
               taskId: completedTaskId,
               error: errorMsg,
+              rawError: rawError,
             });
             this.onTaskComplete?.(this.agentId, completedTaskId, errorMsg, false);
             this.idleTimer = setTimeout(() => { this.idleTimer = null; this.setStatus("idle"); }, CONFIG.timing.idleErrorDelayMs);
@@ -586,6 +895,17 @@ export class AgentSession {
         } catch (err) {
           console.error(`[Agent ${this.agentId}] Error in close handler:`, err);
           this.setStatus("error");
+          
+          if (completedTaskId) {
+            this.onEvent({
+              type: "task:failed",
+              agentId: this.agentId,
+              taskId: completedTaskId,
+              error: err instanceof Error ? err.message : String(err)
+            });
+            this.onTaskComplete?.(this.agentId, completedTaskId, String(err), false);
+          }
+          
           this.dequeueNext();
         }
       });
@@ -594,35 +914,45 @@ export class AgentSession {
         this.process = null;
         this.currentTaskId = null;
         this.setStatus("error");
-        const errorMsg = (err as NodeJS.ErrnoException).code === "ENOENT"
-          ? `"${this.backend.command}" not found. Please install it and make sure it's in your PATH.`
+        
+        const rawError = (err as any).code === "ENOENT" || (err as any).code === -4058
+          ? `"${cmd}" not found (CWD: ${cwd}). Please install it and make sure it's in your PATH.`
           : err.message;
+
+        // Translate to Thai for the user
+        const errorMsg = AgentErrorHandler.formatThai(rawError, { command: cmd, agentId: this.agentId });
+
         this.onEvent({
           type: "task:failed",
           agentId: this.agentId,
           taskId,
           error: errorMsg,
+          rawError: rawError,
         });
         this.idleTimer = setTimeout(() => { this.idleTimer = null; this.setStatus("idle"); }, CONFIG.timing.idleErrorDelayMs);
       });
     } catch (err) {
       this.setStatus("error");
+      const rawError = (err as Error).message;
+      const errorMsg = AgentErrorHandler.formatThai(rawError, { command: cmd, agentId: this.agentId });
       this.onEvent({
         type: "task:failed",
         agentId: this.agentId,
         taskId,
-        error: (err as Error).message,
+        error: errorMsg,
+        rawError: rawError,
       });
     }
   }
 
   /**
    * Send a message to the agent's stdin.
-   * NOTE: Currently a no-op because stdin is set to "ignore" (pipe causes Claude Code to hang).
-   * Future: use --input-format stream-json for bidirectional communication.
    */
-  sendMessage(_message: string): boolean {
-    // stdin is "ignore" — cannot write. See TODO above.
+  sendMessage(message: string): boolean {
+    if (this.process?.stdin?.writable) {
+      this.process.stdin.write(message + "\n");
+      return true;
+    }
     return false;
   }
 
@@ -660,7 +990,7 @@ export class AgentSession {
     if (this.taskQueue.length === 0) return;
     const next = this.taskQueue.shift()!;
     setTimeout(() => {
-      this.runTask(next.taskId, next.prompt, next.repoPath, next.teamContext, false, next.phaseOverride);
+      this.runTask(next.taskId, next.prompt, next.repoPath, next.teamContext, next.teamChat, false, next.phaseOverride, next.imagePath, next.visualContext);
     }, CONFIG.timing.dequeueDelayMs);
   }
 
@@ -703,8 +1033,33 @@ export class AgentSession {
     this.idleTimer = setTimeout(() => { this.idleTimer = null; this.setStatus("idle"); }, CONFIG.timing.idleErrorDelayMs);
   }
 
+  /**
+   * Roll back the workspace to the state before the current/last task started.
+   */
+  public async rollbackLastTask(): Promise<boolean> {
+    if (!this.currentSnapshot) {
+      console.warn(`[Agent ${this.name}] No snapshot available for rollback.`);
+      return false;
+    }
+
+    console.log(`[Agent ${this.name}] Rolling back to snapshot: ${this.currentSnapshot}`);
+    const success = await this.snapshotManager.rollback(this.currentCwd || this.workspace, this.currentSnapshot);
+
+    if (success) {
+      this.currentSnapshot = null;
+      this.onEvent({
+        type: "agent:status",
+        agentId: this.agentId,
+        status: "idle",
+        details: "Workspace rolled back successfully.",
+      });
+    }
+    return success;
+  }
+
   destroy() {
     if (this.taskTimeout) { clearTimeout(this.taskTimeout); this.taskTimeout = null; }
+    if (this.inactivityTimeout) { clearTimeout(this.inactivityTimeout); this.inactivityTimeout = null; }
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
     if (this.process?.pid) {
       const pgid = this.process.pid;
@@ -768,7 +1123,11 @@ export class AgentSession {
     });
   }
 
-  private setStatus(status: AgentStatus) {
+  public getLastPrompt(): string {
+    return this.lastPrompt;
+  }
+
+  public setStatus(status: AgentStatus, details?: string) {
     // Guard: don't downgrade to "idle" if a task is running or queued
     if (status === "idle" && (this.process || this.taskQueue.length > 0)) return;
     this._status = status;
@@ -776,6 +1135,28 @@ export class AgentSession {
       type: "agent:status",
       agentId: this.agentId,
       status,
+      details: details ?? this._lastLogLine ?? undefined,
+      isFailover: this.isFailover,
     });
   }
+
+  private async getEnhancedMemoryContext(prompt: string): Promise<string> {
+    const localContext = getMemoryContext();
+    if (!CONFIG.memory.enabled) return localContext;
+
+    try {
+      // 1. Unified Omni-Memory: local recall + cross-project insights
+      const vectorContext = await vectorMemory.getEnhancedMemoryContext(prompt);
+      
+      // 2. Project-specific structured knowledge base (for NotebookLM context)
+      const projectKnowledge = knowledgeManager.getProjectContext(this.teamId || "default");
+      const knowledgeSection = projectKnowledge ? `\n\n### Project Knowledge Base (Established Modules & Features):\n${projectKnowledge}` : "";
+
+      return `${localContext}${vectorContext}${knowledgeSection}`;
+    } catch (err) {
+      console.warn(`[Agent ${this.name}] Failed to fetch enhanced memory:`, err);
+      return localContext;
+    }
+  }
 }
+

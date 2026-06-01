@@ -6,6 +6,7 @@ export const AgentStatusEvent = z.object({
   agentId: z.string(),
   status: AgentStatusEnum,
   details: z.string().optional(),
+  isFailover: z.boolean().optional(),
 });
 
 export const TaskStartedEvent = z.object({
@@ -113,7 +114,7 @@ export const TeamChatEvent = z.object({
   fromAgentId: z.string(),
   toAgentId: z.string().optional(),
   message: z.string(),
-  messageType: z.enum(["delegation", "result", "status"]),
+  messageType: z.enum(["delegation", "result", "status", "briefing"]),
   taskId: z.string().optional(),
   timestamp: z.number(),
 });
@@ -140,6 +141,13 @@ export const TeamPhaseEvent = z.object({
   leadAgentId: z.string(),
 });
 
+export const MetaThoughtEvent = z.object({
+  type: z.literal("META_THOUGHT"),
+  agentId: z.string(),
+  thought: z.string(),
+  timestamp: z.number(),
+});
+
 export const SuggestionEvent = z.object({
   type: z.literal("SUGGESTION"),
   text: z.string(),
@@ -158,12 +166,30 @@ export const AgentDefsEvent = z.object({
     palette: z.number(),
     isBuiltin: z.boolean(),
     teamRole: z.enum(["dev", "reviewer", "leader"]),
+    avatarUrl: z.string().optional(),
   })),
 });
 
 export const AgentsSyncEvent = z.object({
   type: z.literal("AGENTS_SYNC"),
   agentIds: z.array(z.string()),
+});
+
+export const ToolStartedEvent = z.object({
+  type: z.literal("TOOL_STARTED"),
+  agentId: z.string(),
+  taskId: z.string(),
+  tool: z.string(),
+  input: z.string().optional(),
+});
+
+export const ToolFinishedEvent = z.object({
+  type: z.literal("TOOL_FINISHED"),
+  agentId: z.string(),
+  taskId: z.string(),
+  tool: z.string(),
+  output: z.string().optional(),
+  success: z.boolean(),
 });
 
 const ProjectPreviewSchema = z.object({
@@ -214,6 +240,57 @@ export const ImageUploadedEvent = z.object({
   path: z.string(),
 });
 
+export const BackendsSyncEvent = z.object({
+  type: z.literal("BACKENDS_SYNC"),
+  backends: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    color: z.string().optional(),
+    isInstalled: z.boolean().optional(),
+  })),
+});
+
+export const ConfigDataEvent = z.object({
+  type: z.literal("CONFIG_DATA"),
+  config: z.any(),
+});
+
+export const ConfigUpdatedEvent = z.object({
+  type: z.literal("CONFIG_UPDATED"),
+  config: z.any(),
+});
+
+export const KeyStatusDataEvent = z.object({
+  type: z.literal("KEY_STATUS_DATA"),
+  summary: z.any(),
+});
+
+export const SwarmHealthEvent = z.object({
+  type: z.literal("SWARM_HEALTH"),
+  teamId: z.string(),
+  score: z.number(),
+  status: z.enum(["optimal", "stressed", "failing"]),
+  diagnostics: z.array(z.string()),
+  recommendations: z.array(z.string()),
+});
+
+export const SwarmReassemblyEvent = z.object({
+  type: z.literal("SWARM_REASSEMBLY"),
+  teamId: z.string(),
+  newTeamName: z.string(),
+});
+
+export const KnowledgeSyncedEvent = z.object({
+  type: z.literal("KNOWLEDGE_SYNCED"),
+  projectDir: z.string(),
+  content: z.string(),
+});
+
+export const BatchEvent = z.object({
+  type: z.literal("BATCH"),
+  events: z.array(z.any()), // Can't easily use GatewayEventSchema here due to recursion, but we'll parse inner events
+});
+
 export const GatewayEventSchema = z.discriminatedUnion("type", [
   AgentsSyncEvent,
   AgentStatusEvent,
@@ -237,6 +314,17 @@ export const GatewayEventSchema = z.discriminatedUnion("type", [
   PreviewReadyEvent,
   FolderPickedEvent,
   ImageUploadedEvent,
+  BackendsSyncEvent,
+  ConfigDataEvent,
+  ConfigUpdatedEvent,
+  KeyStatusDataEvent,
+  ToolStartedEvent,
+  ToolFinishedEvent,
+  MetaThoughtEvent,
+  SwarmHealthEvent,
+  SwarmReassemblyEvent,
+  KnowledgeSyncedEvent,
+  BatchEvent,
 ]);
 
 export type TokenUsage = z.infer<typeof TokenUsage>;
@@ -263,4 +351,15 @@ export type ProjectDataEvent = z.infer<typeof ProjectDataEvent>;
 export type PreviewReadyEvent = z.infer<typeof PreviewReadyEvent>;
 export type FolderPickedEvent = z.infer<typeof FolderPickedEvent>;
 export type ImageUploadedEvent = z.infer<typeof ImageUploadedEvent>;
+export type BackendsSyncEvent = z.infer<typeof BackendsSyncEvent>;
+export type ConfigDataEvent = z.infer<typeof ConfigDataEvent>;
+export type ConfigUpdatedEvent = z.infer<typeof ConfigUpdatedEvent>;
+export type KeyStatusDataEvent = z.infer<typeof KeyStatusDataEvent>;
+export type ToolStartedEvent = z.infer<typeof ToolStartedEvent>;
+export type ToolFinishedEvent = z.infer<typeof ToolFinishedEvent>;
+export type MetaThoughtEvent = z.infer<typeof MetaThoughtEvent>;
+export type SwarmHealthEvent = z.infer<typeof SwarmHealthEvent>;
+export type SwarmReassemblyEvent = z.infer<typeof SwarmReassemblyEvent>;
+export type KnowledgeSyncedEvent = z.infer<typeof KnowledgeSyncedEvent>;
+export type BatchEvent = z.infer<typeof BatchEvent>;
 export type GatewayEvent = z.infer<typeof GatewayEventSchema>;

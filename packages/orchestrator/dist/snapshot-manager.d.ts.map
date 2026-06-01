@@ -1,0 +1,1 @@
+{"version":3,"file":"snapshot-manager.d.ts","sourceRoot":"","sources":["../src/snapshot-manager.ts"],"names":[],"mappings":"AAIA;;;GAGG;AACH,qBAAa,eAAe;;IAG1B;;;OAGG;IACU,cAAc,CAAC,UAAU,EAAE,MAAM,EAAE,MAAM,EAAE,MAAM,GAAG,OAAO,CAAC,MAAM,GAAG,IAAI,CAAC;IAuBvF;;OAEG;IACU,QAAQ,CAAC,UAAU,EAAE,MAAM,EAAE,YAAY,EAAE,MAAM,GAAG,OAAO,CAAC,OAAO,CAAC;IAkCjF,OAAO,CAAC,SAAS;CAGlB"}

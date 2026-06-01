@@ -119,7 +119,8 @@ export function renderScene(
     const sprites = getCharacterSprites(ch.palette, ch.hueShift)
     const spriteData = getCharacterSprite(ch, sprites)
     const cached = getCachedSprite(spriteData, charZoom)
-    const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0
+    const isSitting = ch.state === CharacterState.TYPE || ch.state === CharacterState.THINK || ch.state === CharacterState.SEARCHING || ch.state === CharacterState.TESTING || ch.state === CharacterState.WALKING_TO_SERVER
+    const sittingOffset = isSitting ? CHARACTER_SITTING_OFFSET_PX : 0
     const drawX = Math.round(offsetX + ch.x * zoom - cached.width / 2)
     const drawY = Math.round(offsetY + (ch.y + sittingOffset) * zoom - cached.height)
 
@@ -413,7 +414,8 @@ export function renderBubbles(
     }
 
     const cached = getCachedSprite(sprite, charZoom)
-    const sittingOff = ch.state === CharacterState.TYPE ? BUBBLE_SITTING_OFFSET_PX : 0
+    const isSitting = ch.state === CharacterState.TYPE || ch.state === CharacterState.THINK || ch.state === CharacterState.SEARCHING || ch.state === CharacterState.TESTING || ch.state === CharacterState.WALKING_TO_SERVER
+    const sittingOff = isSitting ? BUBBLE_SITTING_OFFSET_PX : 0
     const bubbleX = Math.round(offsetX + ch.x * zoom - cached.width / 2)
     const bubbleY = Math.round(offsetY + (ch.y + sittingOff - BUBBLE_VERTICAL_OFFSET_PX * characterScale) * zoom - cached.height - 1 * zoom)
 
@@ -460,7 +462,8 @@ export function renderSpeechBubbles(
     const boxH = textH + padY * 2
     const tailH = 3 * px
 
-    const sittingOff = ch.state === CharacterState.TYPE ? BUBBLE_SITTING_OFFSET_PX : 0
+    const isSitting = ch.state === CharacterState.TYPE || ch.state === CharacterState.THINK || ch.state === CharacterState.SEARCHING || ch.state === CharacterState.TESTING || ch.state === CharacterState.WALKING_TO_SERVER
+    const sittingOff = isSitting ? BUBBLE_SITTING_OFFSET_PX : 0
     const bubbleX = Math.round(offsetX + ch.x * zoom - boxW / 2)
     const bubbleY = Math.round(
       offsetY + (ch.y + sittingOff - BUBBLE_VERTICAL_OFFSET_PX * characterScale) * zoom - boxH - tailH - 4 * px
@@ -528,7 +531,8 @@ export function renderNameBadges(
     const boxW = textW + padX * 2
     const boxH = textH + padY * 2
 
-    const sittingOff = ch.state === CharacterState.TYPE ? BUBBLE_SITTING_OFFSET_PX : 0
+    const isSitting = ch.state === CharacterState.TYPE || ch.state === CharacterState.THINK || ch.state === CharacterState.SEARCHING || ch.state === CharacterState.TESTING || ch.state === CharacterState.WALKING_TO_SERVER
+    const sittingOff = isSitting ? BUBBLE_SITTING_OFFSET_PX : 0
     // Position above the character head — bubbles drawn later will naturally overlap
     const BADGE_VERTICAL_OFFSET_PX = 26
     const badgeX = Math.round(offsetX + ch.x * zoom - boxW / 2)

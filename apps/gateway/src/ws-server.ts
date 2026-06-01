@@ -1,7 +1,10 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "http";
+import http, { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { WebSocketServer, WebSocket } from "ws";
-import { CommandSchema } from "@office/shared";
+import { CommandSchema, mapOrchestratorEvent } from "@office/shared";
+import { bus } from "@office/shared/infra/bus";
 import type { GatewayEvent, Command, UserRole } from "@office/shared";
+
+
 import { config } from "./config.js";
 import { networkInterfaces, homedir } from "os";
 import { readFile, stat } from "fs/promises";
@@ -10,6 +13,7 @@ import { join, extname, resolve } from "path";
 import * as Ably from "ably";
 import type { Channel, CommandMeta } from "./transport.js";
 import { nanoid } from "nanoid";
+import { getAllBackends } from "./backends.js";
 
 let wss: WebSocketServer | null = null;
 const clients = new Map<WebSocket, { role: UserRole; clientId: string }>();
@@ -77,8 +81,9 @@ export const wsChannel: Channel = {
 
   async init(commandHandler: (cmd: Command, meta: CommandMeta) => void): Promise<boolean> {
     onCommand = commandHandler;
-
+    
     return new Promise((resolve) => {
+
       const requestHandler = async (req: IncomingMessage, res: ServerResponse) => {
         // CORS headers
         res.setHeader("Access-Control-Allow-Origin", "*");
@@ -98,12 +103,13 @@ export const wsChannel: Channel = {
             res.end(JSON.stringify({ error: "Quick connect disabled" }));
             return;
           }
+          const host = req.headers.host || `localhost:${config.wsPort}`;
           const sessionToken = nanoid();
           addSessionToken(sessionToken, "owner");
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({
             machineId: config.machineId,
-            wsUrl: `ws://localhost:${config.wsPort}`,
+            wsUrl: `ws://${host}`,
             role: "owner",
             sessionToken,
           }));
@@ -121,12 +127,13 @@ export const wsChannel: Channel = {
                 res.end(JSON.stringify({ error: "Invalid pair code" }));
                 return;
               }
+              const host = req.headers.host || `localhost:${config.wsPort}`;
               const sessionToken = nanoid();
               addSessionToken(sessionToken, "owner");
               res.writeHead(200, { "Content-Type": "application/json" });
               res.end(JSON.stringify({
                 machineId: config.machineId,
-                wsUrl: `ws://localhost:${config.wsPort}`,
+                wsUrl: `ws://${host}`,
                 hasAbly: !!config.ablyApiKey,
                 role: "owner",
                 sessionToken,
@@ -177,12 +184,13 @@ export const wsChannel: Channel = {
                 res.end(JSON.stringify({ error: "Invalid share token" }));
                 return;
               }
+              const host = req.headers.host || `localhost:${config.wsPort}`;
               const sessionToken = nanoid();
               addSessionToken(sessionToken, share.role);
               res.writeHead(200, { "Content-Type": "application/json" });
               res.end(JSON.stringify({
                 machineId: config.machineId,
-                wsUrl: `ws://localhost:${config.wsPort}`,
+                wsUrl: `ws://${host}`,
                 hasAbly: !!config.ablyApiKey,
                 role: share.role,
                 sessionToken,
@@ -245,7 +253,7 @@ export const wsChannel: Channel = {
                 capability: {
                   [`machine:${targetMachineId}:commands`]: commandsCap,
                   [`machine:${targetMachineId}:events`]: ["subscribe"],
-                },
+                } as any,
               });
 
               res.writeHead(200, { "Content-Type": "application/json" });
@@ -259,23 +267,44 @@ export const wsChannel: Channel = {
           return;
         }
 
-        // --- Static file serving (fallback, production only) ---
-        if (process.env.NODE_ENV === "development") {
-          // In dev mode, redirect page requests to the Next.js dev server
-          const url = req.url?.split("?")[0] ?? "/";
-          const isPageRoute = url === "/" || url === "/pair" || url === "/office" || url === "/join" || !url.includes(".");
-          if (isPageRoute) {
-            const nextPort = process.env.NEXT_DEV_PORT ?? "3000";
-            const query = req.url?.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
-            res.writeHead(302, { Location: `http://localhost:${nextPort}${url}${query}` });
-            res.end();
-            return;
-          }
-          res.writeHead(404);
-          res.end("Not Found (dev mode — use Next.js dev server)");
-          return;
+        // --- Proxy to Internal Web Server (Next.js) ---
+        // All requests not handled by gateway API endpoints above are forwarded to the web frontend
+        const nextPort = process.env.WEB_PORT || "9101";
+        const nextHost = process.env.WEB_HOST || "localhost";
+        const target = `http://${nextHost}:${nextPort}${req.url}`;
+        
+        // Add standard proxy headers
+        const headers = { ...req.headers };
+        const forwardedFor = req.socket.remoteAddress;
+        if (forwardedFor) {
+          headers["x-forwarded-for"] = headers["x-forwarded-for"] 
+            ? `${headers["x-forwarded-for"]}, ${forwardedFor}` 
+            : forwardedFor;
         }
-        await serveStatic(req, res);
+        headers["x-forwarded-proto"] = "http";
+        headers["x-forwarded-host"] = req.headers["host"];
+
+        try {
+          const proxyReq = http.request(target, {
+            method: req.method,
+            headers: headers,
+          }, (proxyRes) => {
+            res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+            proxyRes.pipe(res, { end: true });
+          });
+          
+          proxyReq.on("error", (err) => {
+            console.error("[Proxy Error]", err.message);
+            res.writeHead(502);
+            res.end("Web server not ready. Please refresh in a few seconds.");
+          });
+          
+          req.pipe(proxyReq, { end: true });
+        } catch (err) {
+          console.error("[Proxy Fatal]", err);
+          res.writeHead(500);
+          res.end("Internal Proxy Error");
+        }
       };
 
       const maxRetries = 10;
@@ -316,6 +345,17 @@ export const wsChannel: Channel = {
                         pendingAuth.delete(ws);
                         clearTimeout(authTimer);
                         console.log(`[WS] Client authenticated as ${role} (total: ${clients.size})`);
+                        ws.send(JSON.stringify({ type: "AUTH_OK" }));
+                        // Send current backends to the newly authenticated client
+                        ws.send(JSON.stringify({
+                          type: "BACKENDS_SYNC",
+                          backends: getAllBackends().map(b => ({
+                            id: b.id,
+                            name: b.name,
+                            color: b.color,
+                            isInstalled: true // Simple flag for now
+                          }))
+                        }));
                         return;
                       }
                     }

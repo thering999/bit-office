@@ -10,7 +10,21 @@ import { PhaseMachine } from "./phase-machine.js";
 import { finalizeTeamResult } from "./result-finalizer.js";
 import { createWorktree, mergeWorktree, removeWorktree } from "./worktree.js";
 import { recordReviewFeedback, recordProjectCompletion, recordTechPreference, getMemoryContext } from "./memory.js";
+import { VectorMemory } from "./vector-memory.js";
+import { VisualPerception } from "./visual-perception.js";
+import { ReflectionEngine } from "./reflection-engine.js";
+import { AutoHealer } from "./auto-healer.js";
+import { MetaAgent } from "./meta-agent.js";
+import { MetaArchitect } from "./meta-architect.js";
+import { MetaSwarm } from "./meta-swarm.js";
+import { SnapshotManager } from "./snapshot-manager.js";
+import { SwarmDoctor } from "./doctor.js";
+import { bus } from "@office/shared/infra/bus";
+import { knowledgeManager } from "./knowledge-manager.js";
+import { blackboard } from "./blackboard.js";
 import type { AIBackend } from "./ai-backend.js";
+
+
 import type { TeamPreview } from "./result-finalizer.js";
 import type {
   OrchestratorOptions,
@@ -41,17 +55,80 @@ export class Orchestrator extends EventEmitter<OrchestratorEventMap> {
   private teamChangedFiles = new Set<string>();
   /** Guard against emitting isFinalResult more than once per execute cycle. */
   private teamFinalized = false;
+  private vectorMemory: VectorMemory | null = null;
+  private visualPerception: VisualPerception | null = null;
+  private autoHealer: AutoHealer | null = null;
+  private reflectionEngine: ReflectionEngine;
+  private reflectingTasks = new Set<string>();
+  private metaAgent: MetaAgent;
+  private metaArchitect: MetaArchitect;
+  private snapshotManager: SnapshotManager;
+  private swarmDoctor: SwarmDoctor;
+  private metaSwarm: MetaSwarm | null = null;
+  private teamId: string | null = null;
+  private useVision: boolean;
+  private briefingTimer: ReturnType<typeof setInterval> | null = null;
+  private onBackendFailure?: (agentId: string, backendId: string, error: string) => void;
+  private onBackendCheck?: (backendId: string) => boolean;
 
   constructor(opts: OrchestratorOptions) {
     super();
     this.workspace = opts.workspace;
     this.sandboxMode = opts.sandboxMode ?? "full";
+    this.onBackendFailure = opts.onBackendFailure;
+    this.onBackendCheck = opts.onBackendCheck;
 
     // Register backends
     for (const b of opts.backends) {
       this.backends.set(b.id, b);
     }
-    this.defaultBackendId = opts.defaultBackend ?? opts.backends[0]?.id ?? "claude";
+    console.log(`[Orchestrator] Registered backends: ${Array.from(this.backends.keys()).join(", ")}`);
+    this.defaultBackendId = opts.defaultBackendId ?? opts.backends[0]?.id ?? "claude";
+    this.useVision = opts.useVision ?? true;
+
+    if (CONFIG.memory.enabled) {
+      this.vectorMemory = new VectorMemory();
+      this.vectorMemory.init().catch(() => {});
+    }
+    if (this.useVision) {
+      this.visualPerception = new VisualPerception();
+    }
+    this.autoHealer = new AutoHealer(
+      this.agentManager,
+      (agentId, taskId, prompt) => this.runTask(agentId, { prompt, taskId })
+    );
+    this.metaAgent = new MetaAgent(this.backends, this.defaultBackendId, (thought) => {
+      this.emitEvent({
+        type: "meta:thought",
+        agentId: "system",
+        thought,
+        timestamp: Date.now()
+      });
+    });
+    this.metaArchitect = new MetaArchitect(
+      this.agentManager,
+      this.metaAgent,
+      (prompt) => this.assembleAndCreateTeam(prompt)
+    );
+
+    this.snapshotManager = new SnapshotManager();
+    this.swarmDoctor = new SwarmDoctor(this.workspace);
+    this.reflectionEngine = new ReflectionEngine();
+
+    // Mission title
+    blackboard.setMissionTitle("Collaborative Development");
+    blackboard.on("blackboard:updated", (summary) => {
+      this.emitEvent({
+        type: "team:chat",
+        fromAgentId: "system",
+        message: `Blackboard Updated:\n${summary}`,
+        messageType: "status",
+        timestamp: Date.now()
+      });
+    });
+
+    // Start background loops
+    this.startLoops();
 
     // Prompt engine
     this.promptEngine = new PromptEngine(opts.promptsDir);
@@ -201,33 +278,169 @@ export class Orchestrator extends EventEmitter<OrchestratorEventMap> {
     }
   }
 
+  async assembleAndCreateTeam(prompt: string): Promise<void> {
+    this.emitEvent({
+      type: "team:chat",
+      fromAgentId: "system",
+      message: "Analyzing task and assembling dynamic swarm...",
+      messageType: "status",
+      timestamp: Date.now(),
+    });
+
+    let context: string | undefined;
+    if (this.vectorMemory) {
+      context = await this.vectorMemory.getOmniContext(prompt);
+    }
+
+    const spec = await this.metaAgent.analyzeAndAssemble(prompt, context);
+    if (!spec || !spec.members || spec.members.length === 0) {
+      this.emitEvent({
+        type: "team:chat",
+        fromAgentId: "system",
+        message: "Failed to assemble dynamic team. Proceeding with static team.",
+        messageType: "status",
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    this.emitEvent({
+      type: "team:chat",
+      fromAgentId: "system",
+      message: `Assembled "${spec.teamName}" with ${spec.members.length} members.`,
+      messageType: "status",
+      timestamp: Date.now(),
+    });
+
+    this.createTeam({
+      leadPresetIndex: spec.leadPresetIndex ?? 0,
+      memberPresets: spec.members.map((m) => ({
+        name: m.name,
+        role: m.role,
+        personality: m.personality,
+        palette: m.palette ?? 0
+      })),
+      backends: spec.members.reduce((acc, m, i) => {
+        acc[i] = m.backendId || this.defaultBackendId;
+        return acc;
+      }, {} as Record<string, string>)
+    });
+
+    // Initialize and start Meta-Swarm health monitoring
+    this.teamId = spec.teamName.toLowerCase().replace(/\s+/g, "-");
+    this.metaSwarm = new MetaSwarm(this.agentManager, this.metaAgent, this.teamId);
+    this.metaSwarm.on("swarm:health", (e) => this.emitEvent(e));
+    this.metaSwarm.on("swarm:re-assembly", (spec) => this.handleSwarmReassembly(spec));
+    this.metaSwarm.startMonitoring();
+  }
+
+  /**
+   * Orchestrates the dynamic re-assembly of the swarm based on Meta-Agent strategy.
+   */
+  private async handleSwarmReassembly(spec: any) {
+    this.emitEvent({
+      type: "team:chat",
+      fromAgentId: "system",
+      message: `🚨 Critical health detected. Re-assembling swarm into "${spec.teamName}"...`,
+      messageType: "status",
+      timestamp: Date.now(),
+    });
+
+    // 1. Identify agents to fire (those not in new spec or struggling)
+    // For now, let's just create the new ones. 
+    // In a full implementation, we would compare and surgically replace.
+    this.createTeam({
+      leadPresetIndex: spec.leadPresetIndex ?? 0,
+      memberPresets: spec.members.map((m: any) => ({
+        name: m.name,
+        role: m.role,
+        personality: m.personality,
+        palette: m.palette ?? 0
+      })),
+      backends: spec.members.reduce((acc: any, m: any, i: number) => {
+        acc[i] = m.backendId;
+        return acc;
+      }, {} as Record<string, string>)
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // Task execution
   // ---------------------------------------------------------------------------
 
-  runTask(agentId: string, taskId: string, prompt: string, opts?: RunTaskOpts): void {
+  async runTask(agentId: string, opts: RunTaskOpts): Promise<void> {
     const session = this.agentManager.get(agentId);
     if (!session) {
       this.emitEvent({
         type: "task:failed",
         agentId,
-        taskId,
+        taskId: opts.taskId ?? "unknown",
         error: "Agent not found. Create it first.",
       });
       return;
     }
 
+    const taskId = opts.taskId ?? nanoid();
+    const prompt = opts.prompt;
+
     // User-initiated task on team lead: store original task + reset delegation counters
     if (this.agentManager.isTeamLead(agentId) && !this.delegationRouter.isDelegated(taskId)) {
       // Don't overwrite originalTask if it was pre-set (e.g. plan captured during create→design, or approved plan before execute)
       // In design/complete phases, originalTask holds the plan — user feedback is just the prompt, not a replacement.
-      if (!session.originalTask || !opts?.phaseOverride || (opts.phaseOverride !== "execute" && opts.phaseOverride !== "design" && opts.phaseOverride !== "complete")) {
+      if (!session.originalTask || !opts.phaseOverride || (opts.phaseOverride !== "execute" && opts.phaseOverride !== "design" && opts.phaseOverride !== "complete")) {
         session.originalTask = prompt;
       }
       // Preserve team project dir across execute cycles (set by gateway before runTask)
       const savedProjectDir = this.delegationRouter.getTeamProjectDir();
       this.delegationRouter.clearAll();
       if (savedProjectDir) this.delegationRouter.setTeamProjectDir(savedProjectDir);
+    }
+
+    let imagePath: string | undefined;
+    let visualContext: string | undefined;
+
+    if (this.useVision && this.visualPerception) {
+      try {
+        const screenshot = await this.visualPerception.captureState();
+        if (screenshot) {
+          imagePath = screenshot.path;
+          visualContext = screenshot.context;
+        }
+      } catch (err) {
+        console.warn(`[Orchestrator] Visual perception failed:`, err);
+      }
+    }
+
+    session.runTask(
+      taskId,
+      prompt,
+      opts.repoPath,
+      this.agentManager.getTeamRoster(),
+      this.agentManager.getChatLog(),
+      true,
+      opts.phaseOverride,
+      imagePath,
+      visualContext
+    );
+
+    // Create a safety snapshot before the agent starts its work
+    if (opts.phaseOverride === "execute" || !session.teamId) {
+      try {
+        const targetPath = session.worktreePath ?? (session as any).workspaceDir ?? "";
+        if (targetPath) {
+          const snapshot = await this.snapshotManager.createSnapshot(targetPath, taskId);
+          if (snapshot) {
+            (session as any).currentSnapshot = snapshot;
+            console.log(`[Orchestrator] Created workspace snapshot: ${snapshot} for ${session.name}`);
+          }
+        }
+
+      } catch (err) {
+        console.warn(`[Orchestrator] Snapshot creation failed for ${session.name}:`, err);
+      }
+    }
+
+    if (opts.phaseOverride === "execute") {
       this.teamPreview = null;
       this.teamChangedFiles.clear();
       this.teamFinalized = false;
@@ -266,14 +479,6 @@ export class Orchestrator extends EventEmitter<OrchestratorEventMap> {
       }
     }
 
-    const repoPath = session.worktreePath ?? opts?.repoPath;
-    // Only the team lead gets the full roster (to decide delegation).
-    // Workers don't need it — they just do their assigned task.
-    const teamContext = this.agentManager.isTeamLead(agentId)
-      ? this.agentManager.getTeamRoster()
-      : undefined;
-
-    session.runTask(taskId, prompt, repoPath, teamContext, true /* isUserInitiated */, opts?.phaseOverride);
   }
 
   /**
@@ -525,18 +730,238 @@ export class Orchestrator extends EventEmitter<OrchestratorEventMap> {
     }
   }
 
+  async runDoctor(): Promise<void> {
+    this.emitEvent({
+      type: "team:chat",
+      fromAgentId: "system",
+      message: "🏥 Swarm Doctor: Starting full system diagnostic...",
+      messageType: "status",
+      timestamp: Date.now(),
+    });
+
+    const results = await this.swarmDoctor.diagnose();
+    
+    for (const res of results) {
+      const emoji = res.status === "ok" ? "✅" : res.status === "warn" ? "⚠️" : "❌";
+      this.emitEvent({
+        type: "team:chat",
+        fromAgentId: "system",
+        message: `${emoji} [${res.category}] ${res.message}${res.fix ? `\n🛠️ Fix: ${res.fix}` : ""}`,
+        messageType: "status",
+        timestamp: Date.now(),
+      });
+    }
+
+    this.emitEvent({
+      type: "team:chat",
+      fromAgentId: "system",
+      message: "🏥 Swarm Doctor: Diagnostic complete.",
+      messageType: "status",
+      timestamp: Date.now(),
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // Internal
   // ---------------------------------------------------------------------------
 
-  private handleSessionEvent(event: OrchestratorEvent, agentId: string): void {
+  private async handleSessionEvent(event: OrchestratorEvent, agentId: string): Promise<void> {
+    // ── Automated Collaboration: route agent-to-agent talk ──
+    if ((event as any).type === "agent:talk") {
+      const { target, message } = event as any;
+      const fromSession = this.agentManager.get(agentId);
+      if (!fromSession) return;
+
+      if (target === "team" || target === "Team") {
+        console.log(`[Orchestrator] Swarm Broadcast: ${fromSession.name} -> @Team: ${message}`);
+        
+        // Handle Blocker Detection
+        if (message.includes("BLOCKER DETECTED:")) {
+          const blockerInfo = message.replace("BLOCKER DETECTED:", "").trim();
+          console.log(`[Orchestrator] Critical Blocker detected from ${fromSession.name}: ${blockerInfo}`);
+          
+          const leadId = this.agentManager.getTeamLead();
+          if (leadId && leadId !== agentId) {
+            const lead = this.agentManager.get(leadId);
+            if (lead) {
+              const taskId = `blocker_fix_${nanoid(6)}`;
+              const prompt = `[CRITICAL BLOCKER REPORTED by ${fromSession.name}]\n${blockerInfo}\n\nPlease analyze this blocker and provide a plan to resolve it. Delegate to specialists if needed.`;
+              lead.runTask(taskId, prompt, undefined, this.agentManager.getTeamRoster(), this.agentManager.getChatLog());
+            }
+          }
+        }
+
+        // Handle Quota Failover
+        if (message.includes("FAILOVER_REQUEST: QUOTA_EXCEEDED")) {
+           console.log(`[Orchestrator] Quota exceeded for ${fromSession.name}. Triggering autonomous failover...`);
+           const currentBackend = fromSession.backend;
+           const nextBackendId = currentBackend.failoverTo?.[0];
+           if (nextBackendId) {
+              const nextBackend = this.backends.get(nextBackendId);
+              if (nextBackend) {
+                fromSession.setBackend(nextBackend);
+                const taskId = `failover_${nanoid(6)}`;
+                fromSession.runTask(taskId, fromSession.getLastPrompt());
+              }
+           }
+        }
+
+        // Broadcast to all other idle agents to keep them updated
+        const otherAgents = this.agentManager.getAll().filter(a => a.agentId !== agentId && a.status === "idle");
+        for (const agent of otherAgents) {
+          const taskId = `update_${nanoid(6)}`;
+          const prompt = `[Team Update from ${fromSession.name}]\n${message}\n\nAcknowledge this update and stay ready for your next task.`;
+          // We queue this so it doesn't interrupt, but if they are idle, it runs immediately.
+          agent.runTask(taskId, prompt, undefined, this.agentManager.getTeamRoster(), this.agentManager.getChatLog());
+        }
+      } else {
+        let targetSession = this.agentManager.findByName(target);
+        if (!targetSession) {
+          console.log(`[Orchestrator] Target ${target} not found. Attempting dynamic swarm expansion...`);
+          
+          // Auto-provision a new specialist on the fly
+          const newAgentId = `agent-${nanoid(6)}`;
+          this.createAgent({
+            agentId: newAgentId,
+            name: target,
+            role: `${target} Specialist (Dynamically Summoned)`,
+            personality: `You were summoned by ${fromSession.name} to help with a specific task. Be precise and efficient.`,
+            backend: this.defaultBackendId,
+            teamId: this.teamId || "dynamic-swarm"
+          });
+          
+          targetSession = this.agentManager.get(newAgentId)!;
+        }
+
+        if (targetSession) {
+          console.log(`[Orchestrator] Autonomous Peer Task: ${fromSession.name} -> @${targetSession.name}`);
+          
+          // Trigger the target agent automatically
+          const taskId = `peer_${nanoid(6)}`;
+          const prompt = `[Message from ${fromSession.name}]\n${message}\n\nRespond to this request or coordinate as needed.`;
+          
+          // Use the team project dir for peer tasks
+          const repoPath = this.delegationRouter.getTeamProjectDir() ?? undefined;
+          
+          // Run the task on the target agent
+          targetSession.runTask(taskId, prompt, repoPath, this.agentManager.getTeamRoster(), this.agentManager.getChatLog());
+          
+          this.emitEvent({
+            type: "team:chat",
+            fromAgentId: "system",
+            message: `Automation: Routed peer request from ${fromSession.name} to ${targetSession.name}${targetSession.role.includes("Summoned") ? " (New Specialist Provisioned)" : ""}.`,
+            messageType: "status",
+            timestamp: Date.now()
+          });
+        }
+      }
+    }
+
     // Handle retry logic on task failure (skip if timeout — retrying won't help)
     if (event.type === "task:failed" && this.retryTracker) {
       const taskId = event.taskId;
       const session = this.agentManager.get(agentId);
-      const wasCancelled = event.error === "Task cancelled by user";
+
+      // Workspace Rollback on failure
+      if (session && (session as any).currentSnapshot) {
+        const targetPath = session.worktreePath ?? (session as any).workspaceDir ?? "";
+        if (targetPath) {
+          console.log(`[Orchestrator] Task failed for ${session.name}. Rolling back workspace...`);
+          this.snapshotManager.rollback(targetPath, (session as any).currentSnapshot).catch(err => {
+            console.error(`[Orchestrator] Rollback failed for ${session.name}:`, err);
+          });
+        }
+        (session as any).currentSnapshot = null;
+      }
+
+
+      const wasCancelled = event.error === "Task cancelled by user" || event.rawError === "Task cancelled by user";
       const wasTimeout = session?.wasTimeout ?? false;
-      if (!wasCancelled && !wasTimeout && this.retryTracker.shouldRetry(taskId) && !this.delegationRouter.isDelegated(taskId)) {
+      const errorForLogic = (event.rawError || event.error || "").toLowerCase();
+      const isQuotaError = errorForLogic.includes("terminalquotaerror") || 
+                           errorForLogic.includes("exhausted your daily quota") ||
+                           errorForLogic.includes("429") ||
+                           errorForLogic.includes("402") ||
+                           errorForLogic.includes("ratelimiterror") ||
+                           errorForLogic.includes("usage limit") ||
+                           errorForLogic.includes("overloaded") ||
+                           errorForLogic.includes("quota exceeded") ||
+                           errorForLogic.includes("too many requests") ||
+                           errorForLogic.includes("rate limit reached") ||
+                           errorForLogic.includes("invalid_api_key") ||
+                           errorForLogic.includes("leaked") || 
+                           errorForLogic.includes("api_key_invalid") || 
+                           errorForLogic.includes("denied") || 
+                           errorForLogic.includes("forbidden") || 
+                           errorForLogic.includes("401") ||
+                           errorForLogic.includes("403") ||
+                           errorForLogic.includes("400") ||
+                           errorForLogic.includes("unauthorized") ||
+                           errorForLogic.includes("compositestrategy.route") ||
+                           errorForLogic.includes("modelrouterservice.route") ||
+                           errorForLogic.includes("internal error during command execution");
+
+      const isBrokenBackend = errorForLogic.includes("not found") || 
+                              errorForLogic.includes("cannot find module") ||
+                              errorForLogic.includes("enoent") ||
+                              errorForLogic.includes("failed to fetch") ||
+                              errorForLogic.includes("network error");
+
+      // Handle Key Blacklisting if it's a quota error
+      if (isQuotaError) {
+        this.onBackendFailure?.(agentId, session?.backend.id ?? "unknown", errorForLogic);
+      }
+
+
+
+      if (!wasCancelled && this.retryTracker.shouldRetry(taskId) && !this.delegationRouter.isDelegated(taskId)) {
+        // If it's a quota error, check if we have more keys for this backend
+        const hasMoreKeys = this.onBackendCheck?.(session?.backend.id ?? "unknown") ?? true;
+        const shouldFailover = (isQuotaError && !hasMoreKeys) || isBrokenBackend;
+        const canFailover = session?.backend.failoverTo && session.backend.failoverTo.length > 0;
+        if (shouldFailover && canFailover) {
+          // Try to find the first working failover backend
+          let nextBackend: AIBackend | undefined;
+          let nextBackendId: string | undefined;
+          
+          for (const fid of session.backend.failoverTo!) {
+            const b = this.backends.get(fid);
+            if (b) {
+              // If we have a check function, verify it has keys/is available
+              if (this.onBackendCheck && !this.onBackendCheck(fid)) continue;
+              nextBackend = b;
+              nextBackendId = fid;
+              break;
+            }
+          }
+
+          if (nextBackend && nextBackendId) {
+            const reason = isQuotaError ? "Quota exceeded" : "Backend broken";
+            console.log(`[Orchestrator] ${reason} for ${session?.backend.id ?? "unknown"}. Failing over to ${nextBackendId}...`);
+            session.setBackend(nextBackend);
+            
+            // Emit a status chat so the user knows what's happening instead of just seeing an error
+            this.emitEvent({
+              type: "team:chat",
+              fromAgentId: agentId,
+              message: `System: Switching to ${nextBackend.name} due to ${isQuotaError ? 'quota limits' : 'service issues'}...`,
+              messageType: "status",
+              timestamp: Date.now()
+            });
+
+            // After switching backend, retry the task immediately
+            const retryPrompt = this.retryTracker.getRetryPrompt(taskId) || event.error;
+            setTimeout(() => session.runTask(taskId, retryPrompt), 500);
+            return;
+          }
+        }
+        
+        // If it was a quota error but we have more keys, just let the normal retry logic handle it
+        // which will pick a new key via getEnv().
+        if (isQuotaError && hasMoreKeys) {
+          console.log(`[Orchestrator] Quota error for ${session?.backend.id ?? "unknown"}, but more keys are available. Retrying same backend...`);
+        }
+
         const state = this.retryTracker.recordAttempt(taskId, event.error);
         if (state) {
           this.emitEvent({
@@ -546,6 +971,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEventMap> {
             attempt: state.attempt,
             maxRetries: state.maxRetries,
             error: event.error,
+            rawError: event.rawError,
           });
           const retryPrompt = this.retryTracker.getRetryPrompt(taskId);
           if (retryPrompt) {
@@ -572,11 +998,82 @@ export class Orchestrator extends EventEmitter<OrchestratorEventMap> {
         }
       }
       this.retryTracker.clear(taskId);
+
+      // ── Auto-Healer: trigger autonomous recovery if enabled ──
+      if (this.autoHealer && !wasCancelled && session) {
+        this.autoHealer.handleFailure(event, session);
+      }
     }
 
-    // ── Memory: record reviewer feedback for learning ──
+    // ── Memory: record reviewer feedback and successful outcomes ──
     if (event.type === "task:done") {
       const session = this.agentManager.get(agentId);
+
+      // Autonomous Knowledge Documentation
+      if (session) {
+        const result = event.result;
+        if (result && (result.modules?.length || result.features?.length)) {
+          this.emitEvent({
+            type: "agent:status",
+            agentId,
+            status: "documenting",
+          });
+          
+          knowledgeManager.documentWork({
+            agentName: session.name,
+            role: session.role,
+            taskId: event.taskId,
+            projectDir: result.projectDir || this.teamId || "default",
+            summary: result.summary,
+            modules: result.modules || [],
+            features: result.features || [],
+            timestamp: Date.now()
+          }).catch(err => console.error(`[Orchestrator] Knowledge documentation failed:`, err));
+        }
+      }
+
+      // ── Self-Reflection: trigger autonomous critique if enabled ──
+      const isReflection = event.taskId.startsWith("reflect_");
+
+      if (session && !isReflection && !this.reflectingTasks.has(event.taskId) && this.reflectionEngine.shouldReflect(session, event.result)) {
+        this.reflectingTasks.add(event.taskId);
+        console.log(`[Orchestrator] Task ${event.taskId} completed by ${session.name}, triggering reflection...`);
+        
+        const reflectionResult = await this.reflectionEngine.reflect(session, event.result);
+        if (reflectionResult.suggestedTaskId) {
+          let critique = reflectionResult.critique || "";
+          
+          // Inject autonomous QA commands if requested
+          if (reflectionResult.needsQA) {
+            const qaCommands = [];
+            if (reflectionResult.needsQA === "lint" || reflectionResult.needsQA === "both") qaCommands.push("rtk lint");
+            if (reflectionResult.needsQA === "test" || reflectionResult.needsQA === "both") qaCommands.push("rtk test");
+            
+            critique = `## MANDATORY QA ROUND\n` +
+              `Before proceeding, you MUST run the following verification commands and fix any errors found:\n` +
+              qaCommands.map(c => `- ${c}`).join("\n") + 
+              `\n\n` + critique;
+          }
+
+          // We run it as a normal task on the same session to keep history
+          session.incrementFixRound();
+          setTimeout(() => session.runTask(reflectionResult.suggestedTaskId!, critique), 100);
+          return; // Pause finalization of original task
+        }
+      }
+
+      // If a reflection task just finished, check if we should suppress the "READY" message from logs/chat
+      if (isReflection && event.result.summary.trim().toUpperCase() === "READY") {
+        console.log(`[Orchestrator] Reflection for ${session?.name} finished: READY.`);
+        // Note: The task:done event still flows to UI so user sees "DONE" but no new noise.
+      }
+      
+      // If we got here, reflection is done or not needed
+      this.reflectingTasks.delete(event.taskId);
+
+      if (session && this.vectorMemory) {
+        this.vectorMemory.addExperience(agentId, event.taskId, session.getLastPrompt(), event.result.fullOutput || "", true);
+      }
       const role = session?.role?.toLowerCase() ?? "";
       if (role.includes("review") && event.result?.fullOutput) {
         recordReviewFeedback(event.result.fullOutput);
@@ -753,6 +1250,194 @@ export class Orchestrator extends EventEmitter<OrchestratorEventMap> {
   }
 
   private emitEvent(event: OrchestratorEvent): void {
+    if (event.type === "team:chat") {
+      const agent = this.agentManager.get(event.fromAgentId);
+      this.agentManager.pushChat(agent?.name ?? event.fromAgentId, event.message, event.messageType);
+    } else if (event.type === "task:delegated") {
+      const from = this.agentManager.get(event.fromAgentId);
+      const to = this.agentManager.get(event.toAgentId);
+      this.agentManager.pushChat(from?.name ?? event.fromAgentId, `Delegated task to ${to?.name ?? event.toAgentId}: ${event.prompt.slice(0, 50)}...`, "delegation");
+    } else if (event.type === "task:result-returned") {
+      const from = this.agentManager.get(event.fromAgentId);
+      const to = this.agentManager.get(event.toAgentId);
+      this.agentManager.pushChat(from?.name ?? event.fromAgentId, `Returned result to ${to?.name ?? event.toAgentId}: ${event.summary.slice(0, 50)}...`, "result");
+    } else if (event.type === "meta:thought") {
+      this.agentManager.pushChat("Architect", event.thought, "thought");
+    }
+
+    // Forward to Global Swarm Bus
+    bus.emitEvent(event as any);
+
     this.emit(event.type, event as never);
+
+
+  }
+
+  // ---------------------------------------------------------------------------
+  // Loops
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Emergency rescue: Resets all agents, clears stuck sessions, 
+   * and potentially switches their backend to a stable default (Gemini).
+   */
+  rescueSwarm(): void {
+    this.agentManager.rescueAll(this.defaultBackendId);
+    this.emitEvent({
+      type: "agent:status",
+      agentId: "system",
+      status: "idle",
+    });
+  }
+
+  private startLoops() {
+    // Cognitive Consolidation Loop (every 5 mins)
+    setInterval(() => this.consolidateKnowledge(), 5 * 60 * 1000);
+    // Omni-Memory Pruning Loop (every 24 hrs)
+    setInterval(() => {
+      if (this.vectorMemory) {
+        this.vectorMemory.pruneOldEntries().catch(() => {});
+      }
+    }, 24 * 60 * 60 * 1000);
+    // Swarm Briefing Loop (every 10 seconds)
+    this.startBriefingLoop();
+    // Collaboration Watchdog (every 30 seconds)
+    setInterval(() => this.runWatchdog(), 30_000);
+
+    // Autonomous Self-Improvement Loop (every 12 hours)
+    setInterval(() => {
+      console.log("[Orchestrator] Triggering autonomous self-improvement cycle...");
+      this.metaArchitect.triggerSelfImprovement().catch(() => {});
+    }, 12 * 60 * 60 * 1000);
+  }
+
+  private runWatchdog() {
+    const agents = this.agentManager.getAll();
+    const now = Date.now();
+
+    for (const agent of agents) {
+      // Swarm Pulse: Proactively poke thinking agents to prevent silence
+      if (agent.status === "thinking" || agent.status === "working") {
+         const thinkingTime = now - (agent as any)._lastHealthActivity;
+         if (thinkingTime > 45000) { // 45 seconds of silence while active
+            console.log(`[Swarm Pulse] Poking silent agent ${agent.name}...`);
+            agent.sendMessage("SYSTEM: TEAM SYNC PING. PROVIDE PROGRESS UPDATE NOW.");
+            (agent as any)._lastHealthActivity = now; // Reset timer so we don't spam
+         }
+      }
+
+      // Recovery for HUNG agents
+      if (agent.status === "error" && agent.lastResult?.includes("HUNG")) {
+        console.log(`[Watchdog] Attempting breakthrough for HUNG agent ${agent.name}...`);
+        
+        // Try to poke it first before a full restart
+        const poked = agent.sendMessage("SYSTEM: PROMPT BREAKTHROUGH. ANSWER NOW.");
+        if (poked) {
+           console.log(`[Watchdog] Poked agent ${agent.name} via stdin.`);
+           continue; 
+        }
+
+        const taskId = `recover_${nanoid(6)}`;
+        const prompt = `## SYSTEM RECOVERY: BREAKTHROUGH REQUIRED
+You previously stopped responding. You MUST now resume your task immediately.
+If you were in the middle of a command, check the file system state and continue.
+[Thai: กู้คืนระบบ: คุณหยุดตอบสนองก่อนหน้านี้ กรุณาทำงานต่อทันที ตรวจสอบไฟล์ที่สร้างค้างไว้แล้วลุยต่อเลย]`;
+        
+        this.emitEvent({
+          type: "team:chat",
+          fromAgentId: "system",
+          message: `Watchdog: Recovering non-responsive agent ${agent.name}...`,
+          messageType: "status",
+          timestamp: now,
+        });
+        
+        agent.runTask(taskId, prompt);
+      }
+
+      // Proactive Peer Help: If an agent is idle for too long but we are in Execute phase
+      if (agent.status === "idle" && this.teamId && !this.agentManager.isTeamLead(agent.agentId)) {
+        // Find if anyone asked this agent for help recently in the chat log
+        const chat = this.agentManager.getChatLog();
+        if (chat.includes(`@${agent.name}`) && !chat.includes(`${agent.name} (result):`)) {
+          console.log(`[Watchdog] Prompting idle agent ${agent.name} to respond to peer request...`);
+        }
+      }
+    }
+
+    // Proactive Mission Driver: If everything is idle, but the Blackboard has pending tasks
+    const allIdle = agents.every(a => a.status === "idle" || a.status === "done" || a.status === "error");
+    if (allIdle && this.teamId) {
+      const pendingTasks = blackboard.getEntries().filter(e => e.type === "task" && e.status === "pending");
+      const stalledThreshold = 3 * 60 * 1000; // 3 minutes
+      const hasStalledTasks = pendingTasks.some(t => (now - t.timestamp) > stalledThreshold);
+
+      if (pendingTasks.length > 0 && hasStalledTasks) {
+        const leadId = this.agentManager.getTeamLead();
+        if (leadId) {
+          console.log(`[Watchdog] Mission is stalled with pending tasks. Prodding Lead agent...`);
+          const lead = this.agentManager.get(leadId);
+          if (lead) {
+            const taskId = `prod_${nanoid(6)}`;
+            const prompt = `## MISSION STALLED (URGENT RE-DELEGATION)
+The team is currently idle, but the following tasks have been PENDING on the Blackboard for too long:
+${pendingTasks.map(t => `- ${t.content} (posted ${Math.round((now - t.timestamp) / 1000)}s ago)`).join("\n")}
+
+You MUST take charge, reassess the plan, and delegate these tasks to your team immediately. 
+If an agent is failing, assign it to someone else or try a different approach.
+[Thai: ภารกิจหยุดชะงัก (เร่งด่วน): งานในกระดานค้างอยู่นานเกินไป กรุณาสั่งงานลูกทีมใหม่หรือเปลี่ยนแผนทันที]`;
+            lead.runTask(taskId, prompt);
+          }
+        }
+      }
+    }
+  }
+
+  private startBriefingLoop(): void {
+    if (this.briefingTimer) return;
+    this.briefingTimer = setInterval(() => {
+      this.broadcastBriefings();
+    }, 10 * 1000);
+  }
+
+  private broadcastBriefings(): void {
+    const activeAgents = this.agentManager.getAll().filter((a) => a.status === "working");
+    if (activeAgents.length === 0) return;
+
+    for (const agent of activeAgents) {
+      const lastLog = agent.lastLogLine;
+      if (!lastLog) continue;
+
+      // Broadcast a mission briefing update
+      this.emitEvent({
+        type: "team:chat",
+        fromAgentId: agent.agentId,
+        message: `[Mission Briefing] ${lastLog}`,
+        messageType: "briefing",
+        timestamp: Date.now(),
+      });
+    }
+  }
+
+  private async consolidateKnowledge() {
+    if (!this.vectorMemory) return;
+
+    try {
+      console.log(`[Orchestrator] Running cognitive consolidation...`);
+      const insights = await this.vectorMemory.consolidate();
+      if (insights.length > 0) {
+        console.log(`[Orchestrator] Consolidated ${insights.length} new knowledge insights.`);
+        this.emitEvent({
+          type: "knowledge:consolidated",
+          insights: insights.map((i) => ({
+            id: i.id,
+            title: i.title,
+            content: i.content,
+            tags: i.tags,
+          })),
+        } as any);
+      }
+    } catch (err) {
+      console.error(`[Orchestrator] Cognitive consolidation failed:`, err);
+    }
   }
 }

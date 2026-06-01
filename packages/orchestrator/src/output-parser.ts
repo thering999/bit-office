@@ -18,6 +18,8 @@ export interface ParsedResult {
   projectDir?: string;
   previewCmd?: string;
   previewPort?: number;
+  modules?: string[];
+  features?: string[];
 }
 
 /**
@@ -35,6 +37,8 @@ export function parseAgentOutput(raw: string, fallbackText?: string | null): Par
   const projectDirMatch = text.match(/PROJECT_DIR:\s*(.+)/i);
   const previewCmdMatch = text.match(/PREVIEW_CMD:\s*(.+)/i);
   const previewPortMatch = text.match(/PREVIEW_PORT:\s*[*`_]*(\d+)/i);
+  const modulesMatch = text.match(/MODULES:\s*(.+)/i);
+  const featuresMatch = text.match(/FEATURES:\s*(.+)/i);
 
   // Strip markdown formatting (bold, backticks, italic) that leaders copy from dev output
   const stripMarkdown = (v: string): string =>
@@ -46,6 +50,24 @@ export function parseAgentOutput(raw: string, fallbackText?: string | null): Par
     for (const f of fileList.split(/[,\n]+/)) {
       const cleaned = stripMarkdown(f.trim().replace(/^[-*]\s*/, ""));
       if (cleaned) changedFiles.push(cleaned);
+    }
+  }
+
+  const modules: string[] = [];
+  if (modulesMatch) {
+    const list = modulesMatch[1].trim();
+    for (const m of list.split(/[,\n]+/)) {
+      const cleaned = stripMarkdown(m.trim().replace(/^[-*]\s*/, ""));
+      if (cleaned) modules.push(cleaned);
+    }
+  }
+
+  const features: string[] = [];
+  if (featuresMatch) {
+    const list = featuresMatch[1].trim();
+    for (const f of list.split(/[,\n]+/)) {
+      const cleaned = stripMarkdown(f.trim().replace(/^[-*]\s*/, ""));
+      if (cleaned) features.push(cleaned);
     }
   }
 
@@ -63,12 +85,12 @@ export function parseAgentOutput(raw: string, fallbackText?: string | null): Par
   const previewPort = previewPortMatch ? parseInt(previewPortMatch[1], 10) : undefined;
 
   if (summaryMatch) {
-    return { summary: summaryMatch[1].trim(), fullOutput, changedFiles, entryFile, projectDir, previewCmd, previewPort };
+    return { summary: summaryMatch[1].trim(), fullOutput, changedFiles, entryFile, projectDir, previewCmd, previewPort, modules, features };
   }
 
   // No structured SUMMARY — extract the most meaningful part
   const summary = extractFallbackSummary(text, changedFiles.length > 0, entryFile, projectDir);
-  return { summary, fullOutput, changedFiles, entryFile, projectDir, previewCmd, previewPort };
+  return { summary, fullOutput, changedFiles, entryFile, projectDir, previewCmd, previewPort, modules, features };
 }
 
 /**

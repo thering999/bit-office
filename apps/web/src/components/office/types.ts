@@ -38,6 +38,12 @@ export const CharacterState = {
   IDLE: 'idle',
   WALK: 'walk',
   TYPE: 'type',
+  THINK: 'think',
+  SEARCHING: 'searching',
+  TESTING: 'testing',
+  WALKING_TO_SERVER: 'walking_to_server',
+  DOCUMENTING: 'documenting',
+  DEBUGGING: 'debugging',
 } as const
 export type CharacterState = (typeof CharacterState)[keyof typeof CharacterState]
 
@@ -92,6 +98,7 @@ export const FurnitureType = {
   CHAIR: 'chair',
   PC: 'pc',
   LAMP: 'lamp',
+  SERVER: 'server',
   // Tileset furniture types
   TS_DESK_WOOD: 'ts-desk-wood',
   TS_DESK_GRAY: 'ts-desk-gray',
@@ -163,6 +170,7 @@ export type EditTool = (typeof EditTool)[keyof typeof EditTool]
 export interface Character {
   id: number
   state: CharacterState
+  targetState: CharacterState | null
   dir: Direction
   /** Pixel position */
   x: number
