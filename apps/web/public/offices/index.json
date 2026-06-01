@@ -2,63 +2,73 @@
   {
     "id": "default",
     "name": "Retro",
-    "file": "nostalgic.zip"
+    "file": "nostalgic.zip",
+    "thumbnail": "nostalgic.jpeg"
   },
   {
     "id": "Modern",
     "name": "Modern",
-    "file": "modern-cozy.zip"
-  }
-  ,
+    "file": "modern-cozy.zip",
+    "thumbnail": "modern-cozy.jpeg"
+  },
   {
     "id": "Cute Whimsical",
     "name": "Cute Whimsical",
-    "file": "cute-whimsical.zip"
+    "file": "cute-whimsical.zip",
+    "thumbnail": "cute-whimsical.jpeg"
   },
   {
     "id": "Mythological",
     "name": "Mythological",
-    "file": "mythological.zip"
+    "file": "mythological.zip",
+    "thumbnail": "mythological.jpeg"
   },
-
   {
     "id": "Cyberpunk",
     "name": "Cyberpunk",
-    "file": "cyberpunk.zip"
+    "file": "cyberpunk.zip",
+    "thumbnail": "cyberpunk.jpeg"
   },
   {
     "id": "SciFi",
     "name": "SciFi",
-    "file": "sifi.zip"
+    "file": "sifi.zip",
+    "thumbnail": "sifi.jpeg"
   },
   {
     "id": "Post Apocalyptic",
     "name": "Post Apocalyptic",
-    "file": "postApocalyptic.zip"
+    "file": "postApocalyptic.zip",
+    "thumbnail": "postApocalyptic.jpeg"
   },
   {
     "id": "Historical",
     "name": "Historical",
-    "file": "historical.zip"
+    "file": "historical.zip",
+    "thumbnail": "historical.jpeg"
   },
   {
     "id": "Eastern Fantasy",
     "name": "Eastern Fantasy",
-    "file": "easternFantasy.zip"
+    "file": "easternFantasy.zip",
+    "thumbnail": "easternFantasy.jpeg"
   },
   {
     "id": "Western Fantasy",
     "name": "Western Fantasy",
-    "file": "westernFantasy.zip"
+    "file": "westernFantasy.zip",
+    "thumbnail": "westernFantasy.jpeg"
   },
   {
     "id": "Gothic",
     "name": "Gothic",
-    "file": "gothic.zip"
+    "file": "gothic.zip",
+    "thumbnail": "gothic.jpeg"
   },
   {
     "id": "DarkLegend",
     "name": "DarkLegend",
-    "file": "darkLegend.zip"
+    "file": "darkLegend.zip",
+    "thumbnail": "darkLegend.jpeg"
   }
 ]

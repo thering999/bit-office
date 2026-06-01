@@ -45,6 +45,7 @@ jobs:
         env:
           GITHUB_ACTIONS: "true"
           NEXT_PUBLIC_CLOUD_MODE: "true"
+          NEXT_PUBLIC_BASE_PATH: "/bit-office"
           NEXT_PUBLIC_GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
           NEXT_PUBLIC_OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           NEXT_PUBLIC_DEEPSEEK_API_KEY:   ${{ secrets.DEEPSEEK_API_KEY }}
