@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -38,14 +38,13 @@ jobs:
           node-version: 24
           cache: 'pnpm'
 
-      - name: Install dependencies (web + shared only)
-        run: pnpm install --no-frozen-lockfile --filter web --filter @office/shared
+      - name: Install web dependencies only
+        run: pnpm install --no-frozen-lockfile --filter web --filter "@office/shared"
 
-      - name: Build Next.js App (web only, with baked-in AI keys)
+      - name: Build Next.js static site
         env:
           GITHUB_ACTIONS: "true"
           NEXT_PUBLIC_CLOUD_MODE: "true"
-          # AI Provider API Keys — set in GitHub → Settings → Secrets → Actions
           NEXT_PUBLIC_GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
           NEXT_PUBLIC_OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           NEXT_PUBLIC_DEEPSEEK_API_KEY:   ${{ secrets.DEEPSEEK_API_KEY }}
@@ -55,12 +54,13 @@ jobs:
           NEXT_PUBLIC_OPENAI_API_KEY:     ${{ secrets.OPENAI_API_KEY }}
         run: pnpm --filter web build
 
-      - name: Setup Pages (auto-enable if not yet enabled)
-        uses: actions/configure-pages@v5
+      - name: Setup Pages (enable if not already enabled)
+        uses: actions/configure-pages@v4
         with:
           enablement: true
+        continue-on-error: true
 
-      - name: Upload artifact
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: './apps/web/out'
