@@ -1,0 +1,65 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build Next.js App (with baked-in AI keys)
+        env:
+          GITHUB_ACTIONS: "true"
+          NEXT_PUBLIC_CLOUD_MODE: "true"
+          # AI Provider API Keys (set these in GitHub → Settings → Secrets → Actions)
+          NEXT_PUBLIC_GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
+          NEXT_PUBLIC_OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          NEXT_PUBLIC_DEEPSEEK_API_KEY:   ${{ secrets.DEEPSEEK_API_KEY }}
+          NEXT_PUBLIC_GROQ_API_KEY:       ${{ secrets.GROQ_API_KEY }}
+          NEXT_PUBLIC_TYPHOON_API_KEY:    ${{ secrets.TYPHOON_API_KEY }}
+          NEXT_PUBLIC_CLAUDE_API_KEY:     ${{ secrets.CLAUDE_API_KEY }}
+          NEXT_PUBLIC_OPENAI_API_KEY:     ${{ secrets.OPENAI_API_KEY }}
+        run: pnpm run build
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './apps/web/out'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

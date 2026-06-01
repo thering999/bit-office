@@ -6,6 +6,9 @@ import dynamic from "next/dynamic";
 
 const OfficeSplash = dynamic(() => import("@/components/OfficeSplash"), { ssr: false });
 
+import { getConnection, clearConnection } from "@/lib/storage";
+import { isCloudMode, getAvailableProviders } from "@/lib/cloud-ai";
+
 export default function PairPage() {
   const [gateway, setGateway] = useState("");
   const [code, setCode] = useState("");
@@ -32,23 +35,31 @@ export default function PairPage() {
     }
 
     // 2. Connect to local gateway — dev prefers 9099, release prefers 9090, fallback to nearby ports
-    const isDev = window.location.port === "3000" || window.location.port === "3002";
-    const ports = isDev ? [9099, 9090, 9091] : [9090, 9091, 9099];
+    const isDev = window.location.port === "3000" || window.location.port === "3002" || window.location.port === "3005";
+    const ports = isDev ? [9100, 9105, 9099, 9090, 9091] : [9090, 9091, 9100, 9105, 9099];
     const scanTimeout = isTauri ? 2000 : 1500;
     setStatus("connecting");
     console.log(`[pair] Trying ports [${ports}] (dev=${isDev}, attempt=${attempt + 1}/${maxAttempts})`);
-    for (const gwPort of ports) {
-      try {
-        const origin = `http://localhost:${gwPort}`;
-        const res = await fetch(`${origin}/connect`, { signal: AbortSignal.timeout(scanTimeout) });
-        if (!res.ok) continue;
-        const data = await res.json();
-        console.log(`[pair] Connected to gateway on port ${gwPort}`);
-        const { saveConnection } = await import("@/lib/storage");
-        saveConnection({ mode: "ws", machineId: data.machineId, wsUrl: `ws://localhost:${gwPort}`, role: data.role ?? "owner", sessionToken: data.sessionToken });
-        return true;
-      } catch {
-        // try next port
+    const scanHosts = ["localhost", "127.0.0.1"];
+    const currentHost = window.location.hostname;
+    if (currentHost && currentHost !== "localhost" && currentHost !== "127.0.0.1") {
+      scanHosts.push(currentHost);
+    }
+
+    for (const host of scanHosts) {
+      for (const gwPort of ports) {
+        try {
+          const origin = `http://${host}:${gwPort}`;
+          const res = await fetch(`${origin}/connect`, { signal: AbortSignal.timeout(scanTimeout) });
+          if (!res.ok) continue;
+          const data = await res.json();
+          console.log(`[pair] Connected to gateway on ${host}:${gwPort}`);
+          const { saveConnection } = await import("@/lib/storage");
+          saveConnection({ mode: "ws", machineId: data.machineId, wsUrl: `ws://${host}:${gwPort}`, role: data.role ?? "owner", sessionToken: data.sessionToken });
+          return true;
+        } catch {
+          // try next port/host
+        }
       }
     }
 
@@ -72,7 +83,23 @@ export default function PairPage() {
     };
 
     const run = async () => {
-      const { getConnection, clearConnection } = require("@/lib/storage");
+      // ☁️ Cloud/GitHub Pages mode — skip gateway discovery, go directly to office
+      if (isCloudMode()) {
+        const { saveConnection } = await import("@/lib/storage");
+        const providers = getAvailableProviders();
+        saveConnection({
+          mode: "cloud" as any,
+          machineId: "github-pages-cloud",
+          wsUrl: "",
+          role: "owner",
+          sessionToken: `cloud-${Date.now()}`,
+          cloudProviders: providers,
+        } as any);
+        await navigateAfterDelay();
+        router.push("/office");
+        return;
+      }
+
       const conn = getConnection();
       if (conn && conn.sessionToken) {
         await navigateAfterDelay();
