@@ -35,14 +35,14 @@ jobs:
           node-version: 20
           cache: 'pnpm'
 
-      - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+      - name: Install dependencies (web + shared only)
+        run: pnpm install --no-frozen-lockfile --filter web --filter @office/shared
 
-      - name: Build Next.js App (with baked-in AI keys)
+      - name: Build Next.js App (web only, with baked-in AI keys)
         env:
           GITHUB_ACTIONS: "true"
           NEXT_PUBLIC_CLOUD_MODE: "true"
-          # AI Provider API Keys (set these in GitHub → Settings → Secrets → Actions)
+          # AI Provider API Keys — set in GitHub → Settings → Secrets → Actions
           NEXT_PUBLIC_GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
           NEXT_PUBLIC_OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           NEXT_PUBLIC_DEEPSEEK_API_KEY:   ${{ secrets.DEEPSEEK_API_KEY }}
@@ -50,7 +50,7 @@ jobs:
           NEXT_PUBLIC_TYPHOON_API_KEY:    ${{ secrets.TYPHOON_API_KEY }}
           NEXT_PUBLIC_CLAUDE_API_KEY:     ${{ secrets.CLAUDE_API_KEY }}
           NEXT_PUBLIC_OPENAI_API_KEY:     ${{ secrets.OPENAI_API_KEY }}
-        run: pnpm run build
+        run: pnpm --filter web build
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
