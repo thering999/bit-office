@@ -10,7 +10,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export const CONFIG_DIR = resolve(homedir(), ".bit-office");
 const CONFIG_FILE = resolve(CONFIG_DIR, "config.json");
 
-interface SavedConfig {
+export interface SavedConfig {
   ablyApiKey?: string;
   telegramBotTokens?: (string | null)[];
   detectedBackends?: string[];
@@ -21,19 +21,14 @@ interface SavedConfig {
   claudeApiKeys?: string[];
   openaiApiKeys?: string[];
   openRouterApiKeys?: string[];
-  openaiApiKey?: string;
   openRouterApiKey?: string;
   deepSeekApiKeys?: string[];
   typhoonApiKeys?: string[];
   groqApiKeys?: string[];
   mistralApiKeys?: string[];
-  deepSeekApiKey?: string;
   serpApiKey?: string;
   pineconeApiKey?: string;
   zepApiKey?: string;
-  typhoonApiKey?: string;
-  groqApiKey?: string;
-  mistralApiKey?: string;
   qdrantApiKey?: string;
   postmanApiKey?: string;
   ollamaUrl?: string;
@@ -126,7 +121,7 @@ function buildConfig() {
       console.log(`[Config] Falling back to default workspace: ${defaultWs}`);
       return defaultWs;
     })(),
-    wsPort: Number(process.env.WS_PORT) || 9090,
+    wsPort: Number(process.env.WS_PORT) || 9100,
     ablyApiKey: process.env.ABLY_API_KEY || saved.ablyApiKey || undefined,
     webDir: resolveWebDir(),
     telegramBotTokens: (
@@ -150,42 +145,42 @@ function buildConfig() {
     openaiApiKeys: (() => {
       const env = process.env.OPENAI_API_KEYS || process.env.OPENAI_API_KEY || "";
       if (env) return env.split(",").map(k => k.trim()).filter(Boolean);
-      return saved.openaiApiKeys ?? (saved.openaiApiKey ? [saved.openaiApiKey] : []);
+      return saved.openaiApiKeys ?? [];
     })(),
     openRouterApiKeys: (() => {
       const env = process.env.OPENROUTER_API_KEYS || process.env.OPENROUTER_API_KEY || "";
       if (env) return env.split(",").map(k => k.trim()).filter(Boolean);
       return saved.openRouterApiKeys ?? (saved.openRouterApiKey ? [saved.openRouterApiKey] : []);
     })(),
-    openaiApiKey: process.env.OPENAI_API_KEY || saved.openaiApiKey || undefined,
+    openaiApiKey: process.env.OPENAI_API_KEY || undefined,
     openRouterApiKey: process.env.OPENROUTER_API_KEY || saved.openRouterApiKey || undefined,
     deepSeekApiKeys: (() => {
       const env = process.env.DEEPSEEK_API_KEYS || process.env.DEEPSEEK_API_KEY || "";
       if (env) return env.split(",").map(k => k.trim()).filter(Boolean);
-      return saved.deepSeekApiKeys ?? (saved.deepSeekApiKey ? [saved.deepSeekApiKey] : []);
+      return saved.deepSeekApiKeys ?? [];
     })(),
     typhoonApiKeys: (() => {
       const env = process.env.TYPHOON_API_KEYS || process.env.TYPHOON_API_KEY || "";
       if (env) return env.split(",").map(k => k.trim()).filter(Boolean);
-      return saved.typhoonApiKeys ?? (saved.typhoonApiKey ? [saved.typhoonApiKey] : []);
+      return saved.typhoonApiKeys ?? [];
     })(),
     groqApiKeys: (() => {
       const env = process.env.GROQ_API_KEYS || process.env.GROQ_API_KEY || "";
       if (env) return env.split(",").map(k => k.trim()).filter(Boolean);
-      return saved.groqApiKeys ?? (saved.groqApiKey ? [saved.groqApiKey] : []);
+      return saved.groqApiKeys ?? [];
     })(),
     mistralApiKeys: (() => {
       const env = process.env.MISTRAL_API_KEYS || process.env.MISTRAL_API_KEY || "";
       if (env) return env.split(",").map(k => k.trim()).filter(Boolean);
-      return saved.mistralApiKeys ?? (saved.mistralApiKey ? [saved.mistralApiKey] : []);
+      return saved.mistralApiKeys ?? [];
     })(),
-    deepSeekApiKey: process.env.DEEPSEEK_API_KEY || saved.deepSeekApiKey || undefined,
+    deepSeekApiKey: process.env.DEEPSEEK_API_KEY || undefined,
     serpApiKey: process.env.SERPAPI_API_KEY || saved.serpApiKey || undefined,
     pineconeApiKey: process.env.PINECONE_API_KEY || saved.pineconeApiKey || undefined,
     zepApiKey: process.env.ZEP_API_KEY || saved.zepApiKey || undefined,
-    typhoonApiKey: process.env.TYPHOON_API_KEY || saved.typhoonApiKey || undefined,
-    groqApiKey: process.env.GROQ_API_KEY || saved.groqApiKey || undefined,
-    mistralApiKey: process.env.MISTRAL_API_KEY || saved.mistralApiKey || undefined,
+    typhoonApiKey: process.env.TYPHOON_API_KEY || undefined,
+    groqApiKey: process.env.GROQ_API_KEY || undefined,
+    mistralApiKey: process.env.MISTRAL_API_KEY || undefined,
     qdrantApiKey: process.env.QDRANT_API_KEY || saved.qdrantApiKey || undefined,
     postmanApiKey: process.env.POSTMAN_API_KEY || saved.postmanApiKey || undefined,
   };

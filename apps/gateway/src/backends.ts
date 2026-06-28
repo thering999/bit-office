@@ -39,7 +39,9 @@ function ensureClaudeSettingsForRoot() {
   }
 }
 
-ensureClaudeSettingsForRoot();
+if (process.env.BIT_OFFICE_ALLOW_ROOT_BYPASS === "true") {
+  ensureClaudeSettingsForRoot();
+}
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const genericApiPath = existsSync(path.join(currentDir, "generic-api.js"))
@@ -48,6 +50,26 @@ const genericApiPath = existsSync(path.join(currentDir, "generic-api.js"))
 
 const backends: AIBackend[] = [
   {
+    id: "freellmapi",
+    name: "FreeLLM Swarm (1B+ Free Tokens)",
+    command: "node",
+    buildArgs(prompt) {
+      return [genericApiPath, "freellmapi", prompt];
+    },
+    color: "#32CD32", // Lime Green
+    failoverTo: ["deepseek-r1", "smart-router", "groq-reasoner"],
+  },
+  {
+    id: "deepseek-r1",
+    name: "DeepSeek R1 (Ultimate Reasoner)",
+    command: "node",
+    buildArgs(prompt) {
+      return [genericApiPath, "groq-reasoner", prompt];
+    },
+    color: "#00BFFF", // Deep Sky Blue
+    failoverTo: ["groq-reasoner", "deepseek", "openrouter", "gemini-api"],
+  },
+  {
     id: "smart-router",
     name: "Ultimate Intelligence (Smart Router)",
     command: "node",
@@ -55,7 +77,7 @@ const backends: AIBackend[] = [
       return [genericApiPath, "smart", prompt];
     },
     color: "#FFD700", // Gold
-    failoverTo: ["gemini-cli", "groq", "claude"],
+    failoverTo: ["deepseek-r1", "gemini-cli", "groq", "claude"],
   },
   new ProviderBackend(),
   new GeminiCLIBackend(),
@@ -225,14 +247,21 @@ export function getAllBackends(): AIBackend[] {
 /** Check which AI CLI tools are installed on this machine */
 export function detectBackends(): string[] {
   const detected: string[] = [];
+  const missing: string[] = [];
+  
   for (const backend of backends) {
     try {
       const checkCmd = process.platform === "win32" ? `where ${backend.command}` : `which ${backend.command}`;
       execSync(checkCmd, { stdio: "ignore", timeout: 3000 });
       detected.push(backend.id);
     } catch {
-      // not installed
+      missing.push(backend.command);
     }
   }
+  
+  if (missing.length > 0) {
+    console.log(`[backends] Note: Some AI CLI tools are not installed: ${[...new Set(missing)].join(", ")}`);
+  }
+  
   return detected;
 }

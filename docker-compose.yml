@@ -1,6 +1,8 @@
 services:
   gateway:
-    image: bit-office:god-mode-v5
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
     container_name: bit-office-gateway
     ports:
       - "9105:9100"
@@ -19,7 +21,6 @@ services:
       - apps/gateway/.env
     depends_on:
       - qdrant
-      - ollama
       - web
     environment:
       - NODE_ENV=production
@@ -60,6 +61,8 @@ services:
       - bit-office-net
 
   ollama:
+    profiles:
+      - local
     image: ollama/ollama:latest
     container_name: bit-office-ollama
     ports:

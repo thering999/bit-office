@@ -190,12 +190,7 @@ export class DelegationRouter {
     session.onDelegation = (fromAgentId, targetName, prompt) => {
       if (this.stopped) return;
 
-      // Block delegation in conversational phases (create, design, complete)
-      const phaseCheckSession = this.agentManager.get(fromAgentId);
-      if (phaseCheckSession?.currentPhase && phaseCheckSession.currentPhase !== "execute") {
-        console.log(`[Delegation] BLOCKED: agent ${fromAgentId} is in phase "${phaseCheckSession.currentPhase}", not "execute"`);
-        return;
-      }
+      // Block delegation check removed to allow full inter-agent communication across all phases.
 
       if (this.isBudgetExhausted()) {
         console.log(`[Delegation] BLOCKED: budget exhausted (leaderRounds=${this.leaderRounds}/${CONFIG.delegation.budgetRounds}, reviewCount=${this.reviewCount}/${CONFIG.delegation.maxReviewRounds})`);

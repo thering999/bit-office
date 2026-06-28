@@ -52,7 +52,10 @@ export class VectorMemory {
   }
 
   async init() {
-    console.log("[VectorMemory] Initialization started...");
+    if (!this.geminiKey) {
+      console.warn("[VectorMemory] No GEMINI_API_KEY — vector memory disabled (embeddings require Gemini)");
+      return;
+    }
     console.log("[VectorMemory] Connecting to Qdrant...");
     try {
       const collections = await this.client.getCollections();
@@ -304,28 +307,84 @@ export class VectorMemory {
     }
   }
 
-  async summarize(text: string, systemPrompt: string): Promise<string> {
+  async summarize(text: string, systemPrompt: string, attempt = 1): Promise<string> {
     if (!this.geminiKey) return "";
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${this.geminiKey}`;
+    
+    // Attempt 1: Direct Gemini (Fastest)
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${this.geminiKey}`;
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 45000); 
+
     try {
       const resp = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
           system_instruction: { parts: [{ text: systemPrompt }] },
           contents: [{ parts: [{ text }] }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 500,
+            maxOutputTokens: 1000,
           },
         }),
       });
-      const data = await resp.json();
-      return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      clearTimeout(timeoutId);
+      
+      if (resp.ok) {
+        const data = await resp.json();
+        const result = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (result) return result;
+      }
+      
+      // If not OK, or no result, fall through to Smart Router
+      const errText = await resp.text();
+      console.warn(`[VectorMemory] Direct Gemini failed (${resp.status}), falling back to Smart Router...`);
     } catch (err) {
-      console.error("[VectorMemory] Summarization failed:", err);
-      return "";
+      clearTimeout(timeoutId);
+      console.warn(`[VectorMemory] Direct Gemini crash, falling back to Smart Router...`);
     }
+
+    // Attempt 2: Smart Router (Failover to FreeLLMAPI / SambaNova / Cerebras / Ollama)
+    try {
+      const { spawnSync } = require("child_process");
+      const path = require("path");
+      
+      // Resolve path to generic-api.js (handle both dev and docker)
+      const possiblePaths = [
+        path.resolve(process.cwd(), "apps/gateway/dist/generic-api.js"),
+        path.resolve(process.cwd(), "apps/gateway/src/generic-api.js"),
+        "/app/apps/gateway/dist/generic-api.js",
+        "/app/apps/gateway/src/generic-api.js"
+      ];
+      
+      let scriptPath = "";
+      const fs = require("fs");
+      for (const p of possiblePaths) {
+        if (fs.existsSync(p)) { scriptPath = p; break; }
+      }
+
+      if (scriptPath) {
+        console.log(`[VectorMemory] Executing Smart Router for consolidation: ${scriptPath}`);
+        const fullPrompt = `System: ${systemPrompt}\n\nContent to summarize: ${text}`;
+        const result = spawnSync("node", [scriptPath, "smart", fullPrompt], {
+          encoding: "utf-8",
+          timeout: 90000,
+          env: { ...process.env }
+        });
+        
+        if (result.stdout && result.stdout.trim()) {
+          console.log(`[VectorMemory] Smart Router successfully summarized (${result.stdout.length} chars)`);
+          return result.stdout.trim();
+        }
+        console.error(`[VectorMemory] Smart Router failed: ${result.stderr}`);
+      }
+    } catch (err) {
+      console.error(`[VectorMemory] Smart Router execution error:`, err);
+    }
+
+    return "";
   }
 
   async addExperience(agentId: string, taskId: string, prompt: string, output: string, success: boolean) {

@@ -411,17 +411,23 @@ export class Orchestrator extends EventEmitter<OrchestratorEventMap> {
       }
     }
 
-    session.runTask(
-      taskId,
-      prompt,
-      opts.repoPath,
-      this.agentManager.getTeamRoster(),
-      this.agentManager.getChatLog(),
-      true,
-      opts.phaseOverride,
-      imagePath,
-      visualContext
-    );
+    try {
+      session.runTask(
+        taskId,
+        prompt,
+        opts.repoPath,
+        this.agentManager.getTeamRoster(),
+        this.agentManager.getChatLog(),
+        true,
+        opts.phaseOverride,
+        imagePath,
+        visualContext
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[Orchestrator] runTask threw for agent=${agentId} task=${taskId}:`, err);
+      this.emitEvent({ type: "task:failed", agentId, taskId, error: msg });
+    }
 
     // Create a safety snapshot before the agent starts its work
     if (opts.phaseOverride === "execute" || !session.teamId) {
@@ -858,150 +864,153 @@ export class Orchestrator extends EventEmitter<OrchestratorEventMap> {
     }
 
     // Handle retry logic on task failure (skip if timeout — retrying won't help)
-    if (event.type === "task:failed" && this.retryTracker) {
+    if (event.type === "task:failed") {
       const taskId = event.taskId;
       const session = this.agentManager.get(agentId);
 
-      // Workspace Rollback on failure
-      if (session && (session as any).currentSnapshot) {
-        const targetPath = session.worktreePath ?? (session as any).workspaceDir ?? "";
-        if (targetPath) {
-          console.log(`[Orchestrator] Task failed for ${session.name}. Rolling back workspace...`);
-          this.snapshotManager.rollback(targetPath, (session as any).currentSnapshot).catch(err => {
-            console.error(`[Orchestrator] Rollback failed for ${session.name}:`, err);
-          });
-        }
-        (session as any).currentSnapshot = null;
-      }
-
-
+      // Trigger Auto-Healer for technical recovery (if not cancelled by user)
       const wasCancelled = event.error === "Task cancelled by user" || event.rawError === "Task cancelled by user";
-      const wasTimeout = session?.wasTimeout ?? false;
-      const errorForLogic = (event.rawError || event.error || "").toLowerCase();
-      const isQuotaError = errorForLogic.includes("terminalquotaerror") || 
-                           errorForLogic.includes("exhausted your daily quota") ||
-                           errorForLogic.includes("429") ||
-                           errorForLogic.includes("402") ||
-                           errorForLogic.includes("ratelimiterror") ||
-                           errorForLogic.includes("usage limit") ||
-                           errorForLogic.includes("overloaded") ||
-                           errorForLogic.includes("quota exceeded") ||
-                           errorForLogic.includes("too many requests") ||
-                           errorForLogic.includes("rate limit reached") ||
-                           errorForLogic.includes("invalid_api_key") ||
-                           errorForLogic.includes("leaked") || 
-                           errorForLogic.includes("api_key_invalid") || 
-                           errorForLogic.includes("denied") || 
-                           errorForLogic.includes("forbidden") || 
-                           errorForLogic.includes("401") ||
-                           errorForLogic.includes("403") ||
-                           errorForLogic.includes("400") ||
-                           errorForLogic.includes("unauthorized") ||
-                           errorForLogic.includes("compositestrategy.route") ||
-                           errorForLogic.includes("modelrouterservice.route") ||
-                           errorForLogic.includes("internal error during command execution");
-
-      const isBrokenBackend = errorForLogic.includes("not found") || 
-                              errorForLogic.includes("cannot find module") ||
-                              errorForLogic.includes("enoent") ||
-                              errorForLogic.includes("failed to fetch") ||
-                              errorForLogic.includes("network error");
-
-      // Handle Key Blacklisting if it's a quota error
-      if (isQuotaError) {
-        this.onBackendFailure?.(agentId, session?.backend.id ?? "unknown", errorForLogic);
+      if (!wasCancelled && session && this.autoHealer) {
+        const healingTriggered = await this.autoHealer.handleFailure(event, session);
+        if (healingTriggered) {
+          console.log(`[Orchestrator] Auto-Healer triggered for ${session.name}. Pause normal retry logic.`);
+          return; // Auto-Healer has taken over this failure
+        }
       }
 
-
-
-      if (!wasCancelled && this.retryTracker.shouldRetry(taskId) && !this.delegationRouter.isDelegated(taskId)) {
-        // If it's a quota error, check if we have more keys for this backend
-        const hasMoreKeys = this.onBackendCheck?.(session?.backend.id ?? "unknown") ?? true;
-        const shouldFailover = (isQuotaError && !hasMoreKeys) || isBrokenBackend;
-        const canFailover = session?.backend.failoverTo && session.backend.failoverTo.length > 0;
-        if (shouldFailover && canFailover) {
-          // Try to find the first working failover backend
-          let nextBackend: AIBackend | undefined;
-          let nextBackendId: string | undefined;
-          
-          for (const fid of session.backend.failoverTo!) {
-            const b = this.backends.get(fid);
-            if (b) {
-              // If we have a check function, verify it has keys/is available
-              if (this.onBackendCheck && !this.onBackendCheck(fid)) continue;
-              nextBackend = b;
-              nextBackendId = fid;
-              break;
-            }
-          }
-
-          if (nextBackend && nextBackendId) {
-            const reason = isQuotaError ? "Quota exceeded" : "Backend broken";
-            console.log(`[Orchestrator] ${reason} for ${session?.backend.id ?? "unknown"}. Failing over to ${nextBackendId}...`);
-            session.setBackend(nextBackend);
-            
-            // Emit a status chat so the user knows what's happening instead of just seeing an error
-            this.emitEvent({
-              type: "team:chat",
-              fromAgentId: agentId,
-              message: `System: Switching to ${nextBackend.name} due to ${isQuotaError ? 'quota limits' : 'service issues'}...`,
-              messageType: "status",
-              timestamp: Date.now()
+      if (this.retryTracker) {
+        // Workspace Rollback on failure
+        if (session && (session as any).currentSnapshot) {
+          const targetPath = session.worktreePath ?? (session as any).workspaceDir ?? "";
+          if (targetPath) {
+            console.log(`[Orchestrator] Task failed for ${session.name}. Rolling back workspace...`);
+            this.snapshotManager.rollback(targetPath, (session as any).currentSnapshot).catch(err => {
+              console.error(`[Orchestrator] Rollback failed for ${session.name}:`, err);
             });
-
-            // After switching backend, retry the task immediately
-            const retryPrompt = this.retryTracker.getRetryPrompt(taskId) || event.error;
-            setTimeout(() => session.runTask(taskId, retryPrompt), 500);
-            return;
           }
-        }
-        
-        // If it was a quota error but we have more keys, just let the normal retry logic handle it
-        // which will pick a new key via getEnv().
-        if (isQuotaError && hasMoreKeys) {
-          console.log(`[Orchestrator] Quota error for ${session?.backend.id ?? "unknown"}, but more keys are available. Retrying same backend...`);
+          (session as any).currentSnapshot = null;
         }
 
-        const state = this.retryTracker.recordAttempt(taskId, event.error);
-        if (state) {
-          this.emitEvent({
-            type: "task:retrying",
-            agentId,
-            taskId,
-            attempt: state.attempt,
-            maxRetries: state.maxRetries,
-            error: event.error,
-            rawError: event.rawError,
-          });
-          const retryPrompt = this.retryTracker.getRetryPrompt(taskId);
-          if (retryPrompt) {
-            const session = this.agentManager.get(agentId);
-            if (session) {
-              setTimeout(() => session.runTask(taskId, retryPrompt), CONFIG.timing.retryDelayMs);
-              return; // Don't emit the task:failed — we're retrying
+        const wasTimeout = session?.wasTimeout ?? false;
+        const errorForLogic = (event.rawError || event.error || "").toLowerCase();
+        const isQuotaError = errorForLogic.includes("terminalquotaerror") || 
+                             errorForLogic.includes("exhausted your daily quota") ||
+                             errorForLogic.includes("429") ||
+                             errorForLogic.includes("402") ||
+                             errorForLogic.includes("ratelimiterror") ||
+                             errorForLogic.includes("usage limit") ||
+                             errorForLogic.includes("overloaded") ||
+                             errorForLogic.includes("quota exceeded") ||
+                             errorForLogic.includes("too many requests") ||
+                             errorForLogic.includes("rate limit reached") ||
+                             errorForLogic.includes("invalid_api_key") ||
+                             errorForLogic.includes("leaked") || 
+                             errorForLogic.includes("api_key_invalid") || 
+                             errorForLogic.includes("denied") || 
+                             errorForLogic.includes("forbidden") || 
+                             errorForLogic.includes("401") ||
+                             errorForLogic.includes("403") ||
+                             errorForLogic.includes("400") ||
+                             errorForLogic.includes("unauthorized") ||
+                             errorForLogic.includes("compositestrategy.route") ||
+                             errorForLogic.includes("modelrouterservice.route") ||
+                             errorForLogic.includes("internal error during command execution");
+
+        const isBrokenBackend = errorForLogic.includes("not found") || 
+                                errorForLogic.includes("cannot find module") ||
+                                errorForLogic.includes("enoent") ||
+                                errorForLogic.includes("failed to fetch") ||
+                                errorForLogic.includes("network error");
+
+        // Handle Key Blacklisting if it's a quota error
+        if (isQuotaError) {
+          this.onBackendFailure?.(agentId, session?.backend.id ?? "unknown", errorForLogic);
+        }
+
+        if (!wasCancelled && this.retryTracker.shouldRetry(taskId) && !this.delegationRouter.isDelegated(taskId)) {
+          // If it's a quota error, check if we have more keys for this backend
+          const hasMoreKeys = this.onBackendCheck?.(session?.backend.id ?? "unknown") ?? true;
+          const shouldFailover = (isQuotaError && !hasMoreKeys) || isBrokenBackend;
+          const canFailover = session?.backend.failoverTo && session.backend.failoverTo.length > 0;
+          if (shouldFailover && canFailover) {
+            // Try to find the first working failover backend
+            let nextBackend: AIBackend | undefined;
+            let nextBackendId: string | undefined;
+            
+            for (const fid of session.backend.failoverTo!) {
+              const b = this.backends.get(fid);
+              if (b) {
+                // If we have a check function, verify it has keys/is available
+                if (this.onBackendCheck && !this.onBackendCheck(fid)) continue;
+                nextBackend = b;
+                nextBackendId = fid;
+                break;
+              }
+            }
+
+            if (nextBackend && nextBackendId) {
+              const reason = isQuotaError ? "Quota exceeded" : "Backend broken";
+              console.log(`[Orchestrator] ${reason} for ${session?.backend.id ?? "unknown"}. Failing over to ${nextBackendId}...`);
+              session.setBackend(nextBackend);
+              
+              // Emit a status chat so the user knows what's happening instead of just seeing an error
+              this.emitEvent({
+                type: "team:chat",
+                fromAgentId: agentId,
+                message: `System: Switching to ${nextBackend.name} due to ${isQuotaError ? 'quota limits' : 'service issues'}...`,
+                messageType: "status",
+                timestamp: Date.now()
+              });
+
+              // After switching backend, retry the task immediately
+              const retryPrompt = this.retryTracker.getRetryPrompt(taskId) || event.error;
+              setTimeout(() => session.runTask(taskId, retryPrompt), 500);
+              return;
+            }
+          }
+          
+          // If it was a quota error but we have more keys, just let the normal retry logic handle it
+          // which will pick a new key via getEnv().
+          if (isQuotaError && hasMoreKeys) {
+            console.log(`[Orchestrator] Quota error for ${session?.backend.id ?? "unknown"}, but more keys are available. Retrying same backend...`);
+          }
+
+          const state = this.retryTracker.recordAttempt(taskId, event.error);
+          if (state) {
+            this.emitEvent({
+              type: "task:retrying",
+              agentId,
+              taskId,
+              attempt: state.attempt,
+              maxRetries: state.maxRetries,
+              error: event.error,
+              rawError: event.rawError,
+            });
+            const retryPrompt = this.retryTracker.getRetryPrompt(taskId);
+            if (retryPrompt) {
+              const session = this.agentManager.get(agentId);
+              if (session) {
+                setTimeout(() => session.runTask(taskId, retryPrompt), CONFIG.timing.retryDelayMs);
+                return; // Don't emit the task:failed — we're retrying
+              }
             }
           }
         }
-      }
 
-      // Retries exhausted — check for escalation (skip on cancel)
-      const escalation = wasCancelled ? null : this.retryTracker.getEscalation(taskId);
-      if (escalation) {
-        const leadId = this.agentManager.getTeamLead();
-        if (leadId && leadId !== agentId) {
-          const leadSession = this.agentManager.get(leadId);
-          if (leadSession) {
-            const escalationTaskId = nanoid();
-            const teamContext = this.agentManager.getTeamRoster();
-            leadSession.runTask(escalationTaskId, escalation.prompt, undefined, teamContext);
+        // Retries exhausted — check for escalation (skip on cancel)
+        const escalation = wasCancelled ? null : this.retryTracker.getEscalation(taskId);
+        if (escalation) {
+          const leadId = this.agentManager.getTeamLead();
+          if (leadId && leadId !== agentId) {
+            const leadSession = this.agentManager.get(leadId);
+            if (leadSession) {
+              const escalationTaskId = nanoid();
+              const teamContext = this.agentManager.getTeamRoster();
+              leadSession.runTask(escalationTaskId, escalation.prompt, undefined, teamContext);
+            }
           }
         }
-      }
-      this.retryTracker.clear(taskId);
-
-      // ── Auto-Healer: trigger autonomous recovery if enabled ──
-      if (this.autoHealer && !wasCancelled && session) {
-        this.autoHealer.handleFailure(event, session);
+        this.retryTracker.clear(taskId);
       }
     }
 

@@ -444,8 +444,8 @@ export class AgentSession {
         }
       }, 15_000);
 
-      // Delegation detection regex — support both @Name: and @Name <space>
-      const DELEGATION_RE = /^\s*(?:[-*>]\s*)?(?:\*\*)?@(\w+)(?:[,:]\s*|\s+)(.+)$/;
+      // Delegation detection regex — support @Name: @Name, and Thai names
+      const DELEGATION_RE = /^\s*(?:[-*>]\s*)?(?:\*\*)?@([\w\u0E00-\u0E7F]+)(?:[,:]\s*|\s+)(.+)$/;
       const CHAT_RE = /^\s*(?:[-*>]\s*)?(?:\*\*)?@Team(?:[,:]\s*|\s+)(.+)$/i;
 
       // Handle a line of plain text output (delegation detection + logging)
@@ -459,6 +459,7 @@ export class AgentSession {
           
           const chatMatch = trimmed.match(CHAT_RE);
           const talkToTeamMatch = trimmed.match(/^TALK_TO_TEAM:\s*(.+)$/i);
+          const broadcastMatch = trimmed.match(/^BROADCAST:\s*(.+)$/i);
           
           // Blackboard update patterns
           const taskPattern = trimmed.match(/^TASK:\s*(.+)$/i);
@@ -477,9 +478,9 @@ export class AgentSession {
             });
           }
 
-          if (chatMatch || talkToTeamMatch) {
+          if (chatMatch || talkToTeamMatch || broadcastMatch) {
             this.flushDelegation();
-            const message = (chatMatch?.[1] ?? talkToTeamMatch?.[1])!;
+            const message = (chatMatch?.[1] ?? talkToTeamMatch?.[1] ?? broadcastMatch?.[1])!;
             this.onEvent({
               type: "team:chat",
               fromAgentId: this.agentId,
@@ -498,7 +499,7 @@ export class AgentSession {
           }
 
           const match = (this._isTeamLead || this.teamId) ? trimmed.match(DELEGATION_RE) : null;
-          if (match) {
+          if (match && !trimmed.toLowerCase().startsWith("@team")) {
             // If we were already building a delegation, flush it first
             if (this.pendingDelegation && this.pendingDelegation.targetName !== match[1]) {
               this.flushDelegation();
@@ -522,13 +523,20 @@ export class AgentSession {
           } else if (this.pendingDelegation) {
             // Is this a continuation of the current delegation?
             // We consider it a continuation if it's not a field or a new delegation
-            const isField = /^(STATUS|ENTRY_FILE|PREVIEW_CMD|PREVIEW_PORT|SUMMARY|FILES_CHANGED|PROJECT_DIR|MODULES|FEATURES):/i.test(trimmed);
+            const isField = /^(STATUS|ENTRY_FILE|PREVIEW_CMD|PREVIEW_PORT|SUMMARY|FILES_CHANGED|PROJECT_DIR|MODULES|FEATURES|TASK|INSIGHT|BLOCKER):/i.test(trimmed);
             const isPlanTag = /^\[\/?PLAN\]/i.test(trimmed);
+            const isNextDelegation = trimmed.match(DELEGATION_RE);
             
-            if (!isField && !isPlanTag) {
+            if (!isField && !isPlanTag && !isNextDelegation) {
               this.pendingDelegation.lines.push(trimmed);
             } else {
               this.flushDelegation();
+              // If it's a new delegation, we need to process it again
+              if (isNextDelegation && !trimmed.toLowerCase().startsWith("@team")) {
+                 const [, targetName, delegatedPrompt] = isNextDelegation;
+                 this.pendingDelegation = { targetName, lines: [delegatedPrompt] };
+                 this.onEvent({ type: "agent:talk" as any, agentId: this.agentId, target: targetName, message: delegatedPrompt });
+              }
             }
           }
 
@@ -1158,5 +1166,21 @@ If you are ready to work, use your tools (ls, grep, write_file) to proceed.`;
       return localContext;
     }
   }
+}
+
+/**
+ * Filter out system-level noise and tool call logs from the visible agent chat.
+ */
+function isSystemNoise(line: string): boolean {
+  const noisePatterns = [
+    /^Calling tool:/i,
+    /^Tool response:/i,
+    /^Finished tool:/i,
+    /^mcp\s/i,
+    /^╔|^║|^╚|^═/,
+    /^\s*[-*]{3,}\s*$/,
+    /^(STATUS|FILES_CHANGED|SUMMARY|ENTRY_FILE|PREVIEW_CMD|PREVIEW_PORT):/i,
+  ];
+  return noisePatterns.some(p => p.test(line.trim()));
 }
 

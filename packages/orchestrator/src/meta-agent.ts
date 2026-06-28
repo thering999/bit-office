@@ -118,8 +118,12 @@ Return ONLY valid JSON following the same schema as swarm assembly.`;
         
         child.on("close", () => {
           try {
-            const jsonStr = output.match(/\{[\s\S]*\}/)?.[0];
-            if (jsonStr) {
+            // Find the first and last curly braces to extract the JSON object
+            const firstBrace = output.indexOf('{');
+            const lastBrace = output.lastIndexOf('}');
+            
+            if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+              const jsonStr = output.slice(firstBrace, lastBrace + 1);
               const spec = JSON.parse(jsonStr) as SwarmSpec;
               spec.members.forEach(m => {
                 if (!m.backendId || !this.backends.has(m.backendId)) {
@@ -128,10 +132,12 @@ Return ONLY valid JSON following the same schema as swarm assembly.`;
               });
               resolve(spec);
             } else {
+              console.warn("[MetaAgent] No valid JSON object found in output");
               resolve(null);
             }
           } catch (e) {
             console.error("[MetaAgent] Failed to parse output:", e);
+            console.error("[MetaAgent] Raw output segment:", output.slice(0, 500));
             resolve(null);
           }
         });
